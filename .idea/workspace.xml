@@ -4,19 +4,49 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="66188761-2038-4668-96de-e08ae334eb72" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/ZBridge.iml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
+    <list default="true" id="66188761-2038-4668-96de-e08ae334eb72" name="Changes" comment="initial commit">
+      <change afterPath="$PROJECT_DIR$/scripts/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/smoke_gigachat.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/smoke_plusofon.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/test_end_to_end.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/test_router.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.env.example" beforeDir="false" afterPath="$PROJECT_DIR$/.env.example" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/health.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/health.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/api/plusofon_webhook.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/api/plusofon_webhook.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/logging.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/logging.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/runtime_state.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/runtime_state.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/core/security.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/core/security.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/schemas/messages.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/schemas/messages.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/schemas/plusofon.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/schemas/plusofon.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/gigachat.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/gigachat.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/message_router.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/message_router.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/plusofon.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/plusofon.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/services/retry.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/retry.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/conftest.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/conftest.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_auth.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_auth.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_gigachat.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_gigachat.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_health.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_health.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_plusofon.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_plusofon.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_webhook.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_webhook.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
     <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Python Script" />
+      </list>
+    </option>
   </component>
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
@@ -25,18 +55,30 @@
   "associatedIndex": 4
 }]]></component>
   <component name="ProjectId" id="3IEDgU9dfvlIOfIpwEc967UTNBU" />
-  <component name="ProjectLevelVcsManager" settingsEditedManually="true" />
+  <component name="ProjectLevelVcsManager" settingsEditedManually="true">
+    <ConfirmationsSetting value="2" id="Add" />
+  </component>
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
+    "ASKED_ADD_EXTERNAL_FILES": "true",
     "Python.main.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
-    "git-widget-placeholder": "master"
+    "git-widget-placeholder": "master",
+    "last_opened_file_path": "C:/Users/sekhmych/PycharmProjects/ZBridge"
   }
 }]]></component>
+  <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="C:\Users\sekhmych\PycharmProjects\ZBridge" />
+    </key>
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="C:\Users\sekhmych\PycharmProjects\ZBridge" />
+    </key>
+  </component>
   <component name="RunManager">
     <configuration name="main" type="PythonConfigurationType" factoryName="Python" nameIsGenerated="true">
       <module name="ZBridge" />
@@ -77,6 +119,20 @@
       <option name="presentableId" value="Default" />
       <updated>1787320947134</updated>
     </task>
+    <task id="LOCAL-00001" summary="initial commit">
+      <option name="closed" value="true" />
+      <created>1787322396165</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1787322396165</updated>
+    </task>
+    <option name="localTasksCounter" value="2" />
     <servers />
+  </component>
+  <component name="VcsManagerConfiguration">
+    <option name="ADD_EXTERNAL_FILES_SILENTLY" value="true" />
+    <MESSAGE value="initial commit" />
+    <option name="LAST_COMMIT_MESSAGE" value="initial commit" />
   </component>
 </project>

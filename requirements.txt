@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+httpx
+pydantic
+pydantic-settings
+tenacity
+python-dateutil
+
+pytest
+pytest-asyncio
+respx
+tzdata
