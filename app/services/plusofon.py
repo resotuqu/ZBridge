@@ -115,13 +115,13 @@ class _SMSDialogItem(BaseModel):
 class _SMSDialogResponse(BaseModel):
     """
     GET /api/v1/sms/dialog/{number} has its own, simpler
-    contract: an object with a `data` array, no `pdu` on its
-    items, and no pagination -- it must never be treated as a
-    `_Page` (which requires `success` and offers
-    `next_page_url`). `success` is modeled as optional, not
-    required: we check it when the API happens to send it,
-    without inventing a required field the endpoint may not
-    actually return.
+    contract: an object with a required `success` flag and a
+    `data` array, no `pdu` on its items, and no pagination --
+    it must never be treated as a `_Page` (which additionally
+    offers `next_page_url`). `success` is required, matching
+    the list endpoint: a response missing it, or carrying
+    `success: false`, is invalid/rejected, not silently
+    accepted.
     """
 
     model_config = ConfigDict(
@@ -129,8 +129,8 @@ class _SMSDialogResponse(BaseModel):
         hide_input_in_errors=True,
     )
 
+    success: bool
     data: list[_SMSDialogItem]
-    success: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,12 +312,12 @@ class PlusofonClient:
 
         if date_from is not None:
             body["date_from"] = (
-                self._format_filter_datetime(date_from)
+                self._format_filter_date(date_from)
             )
 
         if date_to is not None:
             body["date_to"] = (
-                self._format_filter_datetime(date_to)
+                self._format_filter_date(date_to)
             )
 
         if incoming is not None:
@@ -432,17 +432,26 @@ class PlusofonClient:
                 "Invalid Plusofon dialog response."
             ) from exc
 
-        if payload.success is False:
+        if not payload.success:
             raise PlusofonError(
                 "Plusofon dialog request was rejected."
             )
 
         return payload
 
-    def _format_filter_datetime(
+    def _format_filter_date(
         self,
         value: datetime,
     ) -> str:
+        """
+        The confirmed Plusofon v1 docs (help.plusofon.ru/api/v1/sms)
+        type date_from/date_to as "date", not "datetime" -- so only
+        the calendar date is sent, as "YYYY-MM-DD". The caller still
+        passes a timezone-aware datetime (not a bare date) so *which*
+        calendar day it resolves to is unambiguous across timezones;
+        it's converted to this client's own timezone before the time
+        portion is discarded.
+        """
         if value.tzinfo is None:
             raise ValueError(
                 "Plusofon date filters must be "
@@ -453,7 +462,7 @@ class PlusofonClient:
             self._default_timezone
         )
 
-        return localized.strftime("%Y-%m-%d %H:%M:%S")
+        return localized.strftime("%Y-%m-%d")
 
     def _history_item_to_message(
         self,
@@ -521,7 +530,6 @@ class PlusofonClient:
     ) -> list[_ItemT]:
         items: list[_ItemT] = []
         next_url: str | None = url
-        next_json: dict[str, object] | None = json_body
         seen_urls: set[str] = set()
 
         for _ in range(_MAX_HISTORY_PAGES):
@@ -540,7 +548,7 @@ class PlusofonClient:
                     partial(
                         self._fetch_page,
                         next_url,
-                        next_json,
+                        json_body,
                         page_model,
                     ),
                     retry_exceptions=(
@@ -564,14 +572,15 @@ class PlusofonClient:
             if page.next_page_url is None:
                 return items
 
+            # next_page_url (e.g. "...?page=2") is only a
+            # continuation cursor -- it carries no date/sender/
+            # receiver/etc. filters of its own, so the exact
+            # same JSON filter body is resent on every page,
+            # not just the first.
             next_url = self._validated_pagination_url(
                 page.next_page_url,
                 current_url=next_url,
             )
-            # The next_page_url is a self-contained
-            # continuation link -- only the very first
-            # request carries the JSON filter body.
-            next_json = None
 
         raise PlusofonError(
             "Plusofon pagination limit exceeded."

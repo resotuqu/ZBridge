@@ -195,8 +195,8 @@ async def test_list_messages_sends_filters_as_json_body_not_query_params() -> (
     body = json.loads(request.content)
 
     assert body == {
-        "date_from": "2026-08-26 00:00:00",
-        "date_to": "2026-08-26 23:59:59",
+        "date_from": "2026-08-26",
+        "date_to": "2026-08-26",
         "incoming": 0,
         "sender": "70000000000",
         "receiver": "79991234567",
@@ -220,9 +220,13 @@ async def test_list_messages_formats_day_boundaries_exactly() -> (
     None
 ):
     """
-    A day boundary passed to list_messages must be rendered as
-    exactly "YYYY-MM-DD HH:MM:SS" in the sender's own timezone,
-    regardless of what tzinfo the caller's datetime carries.
+    date_from/date_to are documented as type "date"
+    (help.plusofon.ru/api/v1/sms), so only the calendar date is
+    sent, as exactly "YYYY-MM-DD" -- resolved in the client's own
+    timezone, regardless of what tzinfo the caller's datetime
+    carries. A UTC timestamp of 2026-08-25 15:00 is already
+    2026-08-26 00:00 in Asia/Yakutsk (UTC+9): if the conversion
+    were skipped, this would wrongly come out as "2026-08-25".
     """
     with respx.mock(assert_all_called=True) as mock:
         route = mock.get(HISTORY_URL).mock(
@@ -232,8 +236,6 @@ async def test_list_messages_formats_day_boundaries_exactly() -> (
         async with httpx.AsyncClient() as http_client:
             client = build_client(http_client)
 
-            # UTC-aware input must still be rendered using the
-            # client's own (Asia/Yakutsk, UTC+9) timezone.
             await client.list_messages(
                 date_from=datetime(
                     2026, 8, 25, 15, 0, 0, tzinfo=ZoneInfo("UTC")
@@ -245,8 +247,8 @@ async def test_list_messages_formats_day_boundaries_exactly() -> (
 
     body = json.loads(route.calls[0].request.content)
 
-    assert body["date_from"] == "2026-08-26 00:00:00"
-    assert body["date_to"] == "2026-08-26 23:59:59"
+    assert body["date_from"] == "2026-08-26"
+    assert body["date_to"] == "2026-08-26"
 
 
 @pytest.mark.asyncio
@@ -321,11 +323,24 @@ async def test_list_messages_paginates_and_sums_pdu() -> None:
     assert messages[0].sent_at.tzinfo is not None
     assert sum(m.pdu or 0 for m in messages) == 3
 
-    # Only the first page carries the JSON filter body; the
-    # follow-up page is a plain continuation GET.
+    # next_page_url (".../sms?page=2") is only a pagination
+    # cursor -- it carries no date/sender/receiver filters of
+    # its own -- so the exact same JSON filter body must be
+    # resent on every page, not just the first.
     assert route.call_count == 2
-    assert json.loads(route.calls[0].request.content)
-    assert route.calls[1].request.content == b""
+
+    first_request = route.calls[0].request
+    second_request = route.calls[1].request
+
+    first_body = json.loads(first_request.content)
+    second_body = json.loads(second_request.content)
+
+    assert first_body
+    assert first_body == second_body
+    assert str(first_request.url) == HISTORY_URL
+    assert str(second_request.url) == (
+        f"{HISTORY_URL}?page=2"
+    )
 
 
 @pytest.mark.asyncio
@@ -728,7 +743,7 @@ async def test_dialog_rejects_invalid_json() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dialog_rejects_missing_required_field() -> (
+async def test_dialog_rejects_missing_data_field() -> (
     None
 ):
     with respx.mock(assert_all_called=True) as mock:
@@ -747,3 +762,90 @@ async def test_dialog_rejects_missing_required_field() -> (
                 await client.get_dialog(
                     "79991234567", 10
                 )
+
+
+@pytest.mark.asyncio
+async def test_dialog_rejects_missing_success_field() -> (
+    None
+):
+    """
+    "success" is a required field on the dialog response, just
+    like it is on the list endpoint -- a response that omits it
+    entirely must be rejected, not silently treated as success.
+    """
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(DIALOG_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={"data": []},
+                # "success" is missing entirely.
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            client = build_client(http_client)
+
+            with pytest.raises(PlusofonError):
+                await client.get_dialog(
+                    "79991234567", 10
+                )
+
+
+@pytest.mark.asyncio
+async def test_dialog_accepts_success_true_with_empty_data() -> (
+    None
+):
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(DIALOG_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={"success": True, "data": []},
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            client = build_client(http_client)
+            messages = await client.get_dialog(
+                "79991234567", 10
+            )
+
+    assert messages == []
+
+
+@pytest.mark.asyncio
+async def test_dialog_accepts_well_formed_success_true_response() -> (
+    None
+):
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(DIALOG_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": [
+                        {
+                            "sender": "79991234567",
+                            "receiver": "70000000000",
+                            "sent_datetime": (
+                                "2026-08-21 09:00:00"
+                            ),
+                            "created_datetime": (
+                                "2026-08-21 09:00:00"
+                            ),
+                            "msg": "привет",
+                            "incoming": True,
+                        },
+                    ],
+                },
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            client = build_client(http_client)
+            messages = await client.get_dialog(
+                "79991234567", 10
+            )
+
+    assert len(messages) == 1
+    assert messages[0].text == "привет"
+    assert messages[0].incoming is True

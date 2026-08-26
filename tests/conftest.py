@@ -18,4 +18,10 @@ _TEST_ENV = {
 
 
 for name, value in _TEST_ENV.items():
-    os.environ[name] = value
+    # setdefault, not unconditional assignment: an operator who
+    # has already exported real Plusofon credentials in the shell
+    # (to run the opt-in, real read-only history check gated by
+    # PLUSOFON_E2E_READONLY) must keep them -- the fake test
+    # values are only a fallback for the normal case where those
+    # variables aren't set at all.
+    os.environ.setdefault(name, value)
