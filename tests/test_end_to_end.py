@@ -17,6 +17,10 @@ CHAT_URL = (
 SEND_URL = (
     "https://restapi.plusofon.ru/api/v1/sms"
 )
+DIALOG_URL = (
+    "https://restapi.plusofon.ru/api/v1"
+    "/sms/dialog/71111111111"
+)
 
 
 def test_webhook_generates_and_sends_reply() -> None:
@@ -67,6 +71,16 @@ def test_webhook_generates_and_sends_reply() -> None:
             )
         )
 
+        dialog_route = mock.get(DIALOG_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": [],
+                    "next_page_url": None,
+                },
+            )
+        )
+
         with TestClient(application) as client:
             response = client.post(
                 (
@@ -89,6 +103,7 @@ def test_webhook_generates_and_sends_reply() -> None:
     assert oauth_route.call_count == 1
     assert chat_route.call_count == 1
     assert send_route.call_count == 1
+    assert dialog_route.call_count == 1
 
     send_payload = json.loads(
         send_route.calls[0].request.content

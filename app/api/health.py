@@ -43,6 +43,9 @@ async def ready(
         "incoming_sms_handler",
         "auth_command_handler",
         "admin_command_handler",
+        "clear_command_handler",
+        "stat_command_handler",
+        "continue_command_handler",
     )
 
     missing_resources = [

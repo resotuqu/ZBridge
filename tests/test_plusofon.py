@@ -1,4 +1,6 @@
 import json
+from datetime import date
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -12,6 +14,10 @@ from app.services.plusofon import (
 
 API_BASE_URL = "https://plusofon.example.test/api/v1"
 SEND_URL = f"{API_BASE_URL}/sms"
+HISTORY_URL = f"{API_BASE_URL}/sms"
+DIALOG_URL = f"{API_BASE_URL}/sms/dialog/79991234567"
+OWN_NUMBER = "70000000000"
+TIMEZONE = ZoneInfo("Asia/Yakutsk")
 
 
 def success_response() -> httpx.Response:
@@ -36,6 +42,8 @@ def build_client(
         client_id=10553,
         number_id=123,
         api_base_url=API_BASE_URL,
+        own_number=OWN_NUMBER,
+        default_timezone=TIMEZONE,
         retry_delays=(0.0, 0.0, 0.0),
     )
 
@@ -127,3 +135,152 @@ async def test_server_error_is_not_retried() -> None:
                 )
 
     assert route.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_list_messages_paginates_and_maps_fields() -> None:
+    page_one = httpx.Response(
+        200,
+        json={
+            "current_page": 1,
+            "data": [
+                {
+                    "created_datetime": (
+                        "2026-08-21 09:59:19"
+                    ),
+                    "sent_datetime": (
+                        "2026-08-21 09:59:21"
+                    ),
+                    "sender": "70000000000",
+                    "receiver": "79991234567",
+                    "msg": "первая часть",
+                    "incoming": False,
+                    "pdu": 2,
+                },
+            ],
+            "next_page_url": (
+                f"{HISTORY_URL}?page=2"
+            ),
+        },
+    )
+    page_two = httpx.Response(
+        200,
+        json={
+            "current_page": 2,
+            "data": [
+                {
+                    "created_datetime": (
+                        "2026-08-21 10:00:00"
+                    ),
+                    "sent_datetime": (
+                        "2026-08-21 10:00:01"
+                    ),
+                    "sender": "79991234567",
+                    "receiver": "70000000000",
+                    "msg": "входящее",
+                    "incoming": True,
+                    "pdu": 1,
+                },
+            ],
+            "next_page_url": None,
+        },
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(HISTORY_URL, params={
+            "date_from": "2026-08-01",
+            "date_to": "2026-08-21",
+            "incoming": "0",
+            "receiver": "79991234567",
+        }).mock(return_value=page_one)
+        mock.get(f"{HISTORY_URL}?page=2").mock(
+            return_value=page_two
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            client = build_client(http_client)
+
+            messages = await client.list_messages(
+                date_from=date(2026, 8, 1),
+                date_to=date(2026, 8, 21),
+                incoming=False,
+                receiver="79991234567",
+            )
+
+    assert len(messages) == 2
+    assert [m.pdu for m in messages] == [2, 1]
+    assert messages[0].incoming is False
+    assert messages[1].incoming is True
+    assert messages[0].sent_at.tzinfo is not None
+    assert sum(m.pdu or 0 for m in messages) == 3
+
+
+@pytest.mark.asyncio
+async def test_get_dialog_derives_direction_and_limit() -> None:
+    response = httpx.Response(
+        200,
+        json={
+            "data": [
+                {
+                    "id": 1,
+                    "jasmax_id": "a",
+                    "sender": "79991234567",
+                    "receiver": "70000000000",
+                    "sent_datetime": (
+                        "2026-08-21 09:00:00"
+                    ),
+                    "created_datetime": (
+                        "2026-08-21 09:00:00"
+                    ),
+                    "msg": "что такое vlan",
+                },
+                {
+                    "id": 2,
+                    "jasmax_id": "b",
+                    "sender": "70000000000",
+                    "receiver": "79991234567",
+                    "sent_datetime": (
+                        "2026-08-21 09:00:05"
+                    ),
+                    "created_datetime": (
+                        "2026-08-21 09:00:05"
+                    ),
+                    "msg": "виртуальная сеть",
+                },
+                {
+                    "id": 3,
+                    "jasmax_id": "c",
+                    "sender": "79991234567",
+                    "receiver": "70000000000",
+                    "sent_datetime": (
+                        "2026-08-21 09:00:10"
+                    ),
+                    "created_datetime": (
+                        "2026-08-21 09:00:10"
+                    ),
+                    "msg": "спасибо",
+                },
+            ],
+            "next_page_url": None,
+        },
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(DIALOG_URL).mock(
+            return_value=response
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            client = build_client(http_client)
+
+            messages = await client.get_dialog(
+                "79991234567",
+                2,
+            )
+
+    assert len(messages) == 2
+    assert messages[0].text == "виртуальная сеть"
+    assert messages[0].incoming is False
+    assert messages[1].text == "спасибо"
+    assert messages[1].incoming is True
+    assert messages[0].pdu is None

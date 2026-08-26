@@ -32,6 +32,11 @@ from app.core.security import (
 from app.schemas.plusofon import (
     PlusofonIncomingWebhook,
 )
+from app.services.message_router import (
+    is_clear_command,
+    is_continue_command,
+    is_stat_command,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -283,6 +288,96 @@ async def receive_incoming_sms(
                 "phone": message.sender,
             },
         )
+
+        return WebhookAcknowledgement()
+
+    if is_clear_command(message.content):
+        boundary = message.received_at
+
+        if boundary.tzinfo is None:
+            boundary = boundary.replace(
+                tzinfo=settings.timezone_info
+            )
+
+        runtime_state.set_context_boundary(
+            message.sender,
+            boundary,
+        )
+
+        logger.info(
+            "Context cleared",
+            extra={
+                "event": "command_routed",
+                "request_id": request_id,
+                "phone": message.sender,
+                "command": "clear",
+            },
+        )
+
+        clear_handler = getattr(
+            request.app.state,
+            "clear_command_handler",
+            None,
+        )
+
+        if clear_handler is not None:
+            background_tasks.add_task(
+                clear_handler,
+                message,
+                request_id,
+            )
+
+        return WebhookAcknowledgement()
+
+    if is_stat_command(message.content):
+        logger.info(
+            "Stat command routed",
+            extra={
+                "event": "command_routed",
+                "request_id": request_id,
+                "phone": message.sender,
+                "command": "stat",
+            },
+        )
+
+        stat_handler = getattr(
+            request.app.state,
+            "stat_command_handler",
+            None,
+        )
+
+        if stat_handler is not None:
+            background_tasks.add_task(
+                stat_handler,
+                message,
+                request_id,
+            )
+
+        return WebhookAcknowledgement()
+
+    if is_continue_command(message.content):
+        logger.info(
+            "Continue command routed",
+            extra={
+                "event": "command_routed",
+                "request_id": request_id,
+                "phone": message.sender,
+                "command": "continue",
+            },
+        )
+
+        continue_handler = getattr(
+            request.app.state,
+            "continue_command_handler",
+            None,
+        )
+
+        if continue_handler is not None:
+            background_tasks.add_task(
+                continue_handler,
+                message,
+                request_id,
+            )
 
         return WebhookAcknowledgement()
 
