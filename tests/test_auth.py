@@ -5,6 +5,7 @@ from app.core.security import (
     is_sms_loop,
     mask_phone_number,
     normalize_phone_number,
+    parse_auth_command,
 )
 
 
@@ -71,3 +72,34 @@ def test_sms_loop_protection() -> None:
         service_number,
         service_number,
     )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_pin"),
+    [
+        ("3957 auth", "3957"),
+        ("  3957   AUTH  ", "3957"),
+        ("3957 Auth", "3957"),
+    ],
+)
+def test_parse_auth_command_matches(
+    text: str,
+    expected_pin: str,
+) -> None:
+    assert parse_auth_command(text) == expected_pin
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "auth",
+        "3957",
+        "3957 authorize",
+        "Что такое VLAN?",
+        "3957 auth extra",
+    ],
+)
+def test_parse_auth_command_rejects(
+    text: str,
+) -> None:
+    assert parse_auth_command(text) is None

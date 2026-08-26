@@ -25,6 +25,7 @@ from app.core.runtime_state import (
 from app.core.security import (
     is_phone_allowed,
     is_sms_loop,
+    parse_auth_command,
     secrets_equal,
 )
 from app.schemas.plusofon import (
@@ -169,10 +170,54 @@ async def receive_incoming_sms(
 
         return WebhookAcknowledgement()
 
-    if not is_phone_allowed(
+    is_authorized = is_phone_allowed(
         message.sender,
         settings.allowed_phone_numbers,
-    ):
+    ) or runtime_state.is_temporarily_authorized(
+        message.sender
+    )
+
+    if not is_authorized:
+        pin_candidate = parse_auth_command(
+            message.content
+        )
+
+        if (
+            pin_candidate is not None
+            and settings.auth_pin is not None
+            and secrets_equal(
+                pin_candidate,
+                settings.auth_pin.get_secret_value(),
+            )
+        ):
+            runtime_state.authorize_temporarily(
+                message.sender
+            )
+
+            logger.info(
+                "Phone temporarily authorized",
+                extra={
+                    "event": "auth_success",
+                    "request_id": request_id,
+                    "phone": message.sender,
+                },
+            )
+
+            auth_handler = getattr(
+                request.app.state,
+                "auth_command_handler",
+                None,
+            )
+
+            if auth_handler is not None:
+                background_tasks.add_task(
+                    auth_handler,
+                    message,
+                    request_id,
+                )
+
+            return WebhookAcknowledgement()
+
         logger.warning(
             "Unauthorized phone ignored",
             extra={

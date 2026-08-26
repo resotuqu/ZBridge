@@ -12,6 +12,7 @@ _TEST_ENV = {
         "test-gigachat-credentials"
     ),
     "ALLOWED_PHONE_NUMBERS": "71111111111",
+    "AUTH_PIN": "9999",
 }
 
 

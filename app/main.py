@@ -17,6 +17,7 @@ from app.core.logging import configure_logging
 from app.core.runtime_state import RuntimeState
 from app.services.gigachat import GigaChatClient
 from app.services.message_router import (
+    AuthCommandProcessor,
     IncomingSMSProcessor,
     MessageRouter,
 )
@@ -93,6 +94,10 @@ async def lifespan(
             application.state.runtime_state,
         )
 
+        auth_command_processor = AuthCommandProcessor(
+            plusofon_client
+        )
+
         application.state.http_client = http_client
         application.state.gigachat_client = (
             gigachat_client
@@ -105,6 +110,9 @@ async def lifespan(
         )
         application.state.sms_processor = (
             sms_processor
+        )
+        application.state.auth_command_processor = (
+            auth_command_processor
         )
 
         current_handler = (
@@ -126,6 +134,28 @@ async def lifespan(
 
         application.state.managed_incoming_sms_handler = (
             sms_processor
+        )
+
+        current_auth_handler = (
+            application.state.auth_command_handler
+        )
+        managed_auth_handler = (
+            application
+            .state
+            .managed_auth_command_handler
+        )
+
+        if (
+            current_auth_handler is None
+            or current_auth_handler
+            is managed_auth_handler
+        ):
+            application.state.auth_command_handler = (
+                auth_command_processor
+            )
+
+        application.state.managed_auth_command_handler = (
+            auth_command_processor
         )
 
         logger.info(
@@ -174,6 +204,8 @@ def create_app() -> FastAPI:
     application.state.runtime_state = RuntimeState()
     application.state.incoming_sms_handler = None
     application.state.managed_incoming_sms_handler = None
+    application.state.auth_command_handler = None
+    application.state.managed_auth_command_handler = None
 
     application.include_router(health_router)
     application.include_router(

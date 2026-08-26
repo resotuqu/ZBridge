@@ -41,6 +41,7 @@ async def ready(
         "gigachat_client",
         "plusofon_client",
         "incoming_sms_handler",
+        "auth_command_handler",
     )
 
     missing_resources = [

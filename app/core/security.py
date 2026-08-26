@@ -6,6 +6,10 @@ from collections.abc import Collection
 
 
 _NON_DIGIT_RE = re.compile(r"\D+")
+_AUTH_COMMAND_RE = re.compile(
+    r"^\s*(\S+)\s+auth\s*$",
+    re.IGNORECASE,
+)
 
 
 def normalize_phone_number(value: str | int) -> str:
@@ -44,6 +48,16 @@ def is_sms_loop(
         normalize_phone_number(src_number) == normalized_service
         or normalize_phone_number(dst_number) != normalized_service
     )
+
+
+def parse_auth_command(text: str) -> str | None:
+    """Return the PIN candidate from an "<PIN> auth" command, if present."""
+    match = _AUTH_COMMAND_RE.match(text)
+
+    if match is None:
+        return None
+
+    return match.group(1)
 
 
 def secrets_equal(candidate: str, expected: str) -> bool:
