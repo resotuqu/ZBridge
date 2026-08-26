@@ -70,6 +70,27 @@ class _ChatResponse(BaseModel):
     choices: list[_Choice]
 
 
+class GigaChatModel(BaseModel):
+    model_config = ConfigDict(
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+    id: str
+    object: str
+    owned_by: str
+
+
+class GigaChatModelsResponse(BaseModel):
+    model_config = ConfigDict(
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+    object: str
+    data: list[GigaChatModel]
+
+
 @dataclass(frozen=True, slots=True)
 class OAuthToken:
     access_token: str
@@ -150,6 +171,106 @@ class GigaChatClient:
                 model=model,
                 access_token=refreshed_token,
             )
+
+    async def list_models(
+        self,
+    ) -> list[GigaChatModel]:
+        access_token = (
+            await self._get_access_token()
+        )
+
+        try:
+            return await self._list_models_with_retries(
+                access_token=access_token
+            )
+
+        except GigaChatAuthError:
+            refreshed_token = (
+                await self._get_access_token(
+                    force_refresh=True,
+                    rejected_token=access_token,
+                )
+            )
+
+            return await self._list_models_with_retries(
+                access_token=refreshed_token
+            )
+
+    async def _list_models_with_retries(
+        self,
+        *,
+        access_token: str,
+    ) -> list[GigaChatModel]:
+        async def operation() -> list[GigaChatModel]:
+            return await self._list_models_once(
+                access_token=access_token
+            )
+
+        try:
+            return await call_with_retries(
+                operation,
+                retry_exceptions=(
+                    httpx.TransportError,
+                    GigaChatTransientError,
+                ),
+                delays=self._retry_delays,
+                on_retry=self._log_retry,
+            )
+        except httpx.TransportError as exc:
+            raise GigaChatTransientError(
+                "Models transport failed."
+            ) from exc
+
+    async def _list_models_once(
+        self,
+        *,
+        access_token: str,
+    ) -> list[GigaChatModel]:
+        response = await self._http.get(
+            f"{self._api_base_url}/models",
+            headers={
+                "Accept": "application/json",
+                "Authorization": (
+                    f"Bearer {access_token}"
+                ),
+            },
+        )
+
+        if response.status_code == 401:
+            raise GigaChatAuthError(
+                "Access token rejected."
+            )
+
+        if (
+            response.status_code == 429
+            or response.status_code >= 500
+        ):
+            raise GigaChatTransientError(
+                "Models temporarily unavailable: "
+                f"{response.status_code}"
+            )
+
+        if response.status_code != 200:
+            raise GigaChatError(
+                "Unexpected models status: "
+                f"{response.status_code}"
+            )
+
+        try:
+            payload = (
+                GigaChatModelsResponse.model_validate(
+                    response.json()
+                )
+            )
+        except (
+            ValueError,
+            ValidationError,
+        ) as exc:
+            raise GigaChatError(
+                "Invalid models response."
+            ) from exc
+
+        return payload.data
 
     async def _get_access_token(
             self,

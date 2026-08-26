@@ -35,7 +35,9 @@ from app.schemas.plusofon import (
 from app.services.message_router import (
     is_clear_command,
     is_continue_command,
+    is_models_command,
     is_stat_command,
+    parse_latin_command,
 )
 
 
@@ -249,18 +251,13 @@ async def receive_incoming_sms(
                 settings.master_pin.get_secret_value(),
             )
         ):
-            runtime_state.set_selected_model(
-                message.sender,
-                model_name,
-            )
-
             logger.info(
-                "Model changed by admin command",
+                "Admin model command routed",
                 extra={
-                    "event": "admin_model_changed",
+                    "event": "command_routed",
                     "request_id": request_id,
                     "phone": message.sender,
-                    "model": model_name,
+                    "command": "model",
                 },
             )
 
@@ -351,6 +348,68 @@ async def receive_incoming_sms(
                 stat_handler,
                 message,
                 request_id,
+            )
+
+        return WebhookAcknowledgement()
+
+    if is_models_command(message.content):
+        logger.info(
+            "Models command routed",
+            extra={
+                "event": "command_routed",
+                "request_id": request_id,
+                "phone": message.sender,
+                "command": "models",
+            },
+        )
+
+        models_handler = getattr(
+            request.app.state,
+            "models_command_handler",
+            None,
+        )
+
+        if models_handler is not None:
+            background_tasks.add_task(
+                models_handler,
+                message,
+                request_id,
+            )
+
+        return WebhookAcknowledgement()
+
+    latin_command = parse_latin_command(
+        message.content
+    )
+
+    if latin_command is not None:
+        runtime_state.set_latin_mode(
+            message.sender,
+            latin_command,
+        )
+
+        logger.info(
+            "Latin mode changed",
+            extra={
+                "event": "command_routed",
+                "request_id": request_id,
+                "phone": message.sender,
+                "command": "latin",
+            },
+        )
+
+        latin_handler = getattr(
+            request.app.state,
+            "latin_command_handler",
+            None,
+        )
+
+        if latin_handler is not None:
+            background_tasks.add_task(
+                latin_handler,
+                message,
+                request_id,
+                latin_command,
             )
 
         return WebhookAcknowledgement()

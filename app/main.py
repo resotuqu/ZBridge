@@ -23,7 +23,9 @@ from app.services.message_router import (
     ClearCommandProcessor,
     ContinueCommandProcessor,
     IncomingSMSProcessor,
+    LatinCommandProcessor,
     MessageRouter,
+    ModelsCommandProcessor,
     StatCommandProcessor,
 )
 from app.services.plusofon import PlusofonClient
@@ -125,6 +127,9 @@ async def lifespan(
             max_context_messages=(
                 settings.max_context_messages
             ),
+            default_latin_enabled=(
+                settings.default_latin_enabled
+            ),
         )
 
         answer_delivery = AnswerDelivery(
@@ -146,10 +151,23 @@ async def lifespan(
         )
 
         admin_command_processor = AdminCommandProcessor(
-            plusofon_client
+            plusofon_client,
+            gigachat_client,
+            application.state.runtime_state,
         )
 
         clear_command_processor = ClearCommandProcessor(
+            plusofon_client
+        )
+
+        models_command_processor = ModelsCommandProcessor(
+            plusofon_client,
+            gigachat_client,
+            application.state.runtime_state,
+            default_model=settings.gigachat_model,
+        )
+
+        latin_command_processor = LatinCommandProcessor(
             plusofon_client
         )
 
@@ -200,6 +218,12 @@ async def lifespan(
         application.state.continue_command_processor = (
             continue_command_processor
         )
+        application.state.models_command_processor = (
+            models_command_processor
+        )
+        application.state.latin_command_processor = (
+            latin_command_processor
+        )
 
         _install_handler(
             application,
@@ -248,6 +272,22 @@ async def lifespan(
                 "managed_continue_command_handler"
             ),
             processor=continue_command_processor,
+        )
+        _install_handler(
+            application,
+            state_attr="models_command_handler",
+            managed_attr=(
+                "managed_models_command_handler"
+            ),
+            processor=models_command_processor,
+        )
+        _install_handler(
+            application,
+            state_attr="latin_command_handler",
+            managed_attr=(
+                "managed_latin_command_handler"
+            ),
+            processor=latin_command_processor,
         )
 
         logger.info(
@@ -306,6 +346,14 @@ def create_app() -> FastAPI:
     application.state.managed_stat_command_handler = None
     application.state.continue_command_handler = None
     application.state.managed_continue_command_handler = (
+        None
+    )
+    application.state.models_command_handler = None
+    application.state.managed_models_command_handler = (
+        None
+    )
+    application.state.latin_command_handler = None
+    application.state.managed_latin_command_handler = (
         None
     )
 
