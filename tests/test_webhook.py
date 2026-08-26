@@ -334,3 +334,148 @@ def test_unknown_phone_with_wrong_auth_pin_is_ignored(
 
     assert response.status_code == 200
     assert auth_received == []
+
+
+def test_authorized_phone_with_correct_master_pin_changes_model(
+    webhook_app: FastAPI,
+) -> None:
+    admin_received: list[
+        tuple[IncomingSMS, str, str]
+    ] = []
+
+    async def admin_handler(
+        message: IncomingSMS,
+        request_id: str,
+        model: str,
+    ) -> None:
+        admin_received.append(
+            (message, request_id, model)
+        )
+
+    webhook_app.state.admin_command_handler = (
+        admin_handler
+    )
+
+    payload = valid_payload()
+    payload["content"] = (
+        "8241 model GigaChat-2-Pro"
+    )
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert len(admin_received) == 1
+    assert (
+        admin_received[0][0].sender
+        == "71111111111"
+    )
+    assert admin_received[0][2] == "GigaChat-2-Pro"
+    assert (
+        webhook_app.state.runtime_state
+        .get_selected_model("71111111111")
+        == "GigaChat-2-Pro"
+    )
+
+
+def test_authorized_phone_with_wrong_master_pin_is_ignored(
+    webhook_app: FastAPI,
+) -> None:
+    admin_received: list[
+        tuple[IncomingSMS, str, str]
+    ] = []
+    sms_received: list[
+        tuple[IncomingSMS, str]
+    ] = []
+
+    async def admin_handler(
+        message: IncomingSMS,
+        request_id: str,
+        model: str,
+    ) -> None:
+        admin_received.append(
+            (message, request_id, model)
+        )
+
+    async def sms_handler(
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        sms_received.append(
+            (message, request_id)
+        )
+
+    webhook_app.state.admin_command_handler = (
+        admin_handler
+    )
+    webhook_app.state.incoming_sms_handler = (
+        sms_handler
+    )
+
+    payload = valid_payload()
+    payload["content"] = (
+        "0000 model GigaChat-2-Pro"
+    )
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert admin_received == []
+    assert sms_received == []
+    assert (
+        webhook_app.state.runtime_state
+        .get_selected_model("71111111111")
+        is None
+    )
+
+
+def test_unknown_phone_cannot_use_master_pin(
+    webhook_app: FastAPI,
+) -> None:
+    admin_received: list[
+        tuple[IncomingSMS, str, str]
+    ] = []
+
+    async def admin_handler(
+        message: IncomingSMS,
+        request_id: str,
+        model: str,
+    ) -> None:
+        admin_received.append(
+            (message, request_id, model)
+        )
+
+    webhook_app.state.admin_command_handler = (
+        admin_handler
+    )
+
+    payload = valid_payload()
+    payload["src_number"] = "73333333333"
+    payload["content"] = (
+        "8241 model GigaChat-2-Pro"
+    )
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert admin_received == []

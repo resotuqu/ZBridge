@@ -129,6 +129,10 @@ class RuntimeState:
         default_factory=set
     )
 
+    selected_model_by_phone: dict[str, str] = field(
+        default_factory=dict
+    )
+
     per_phone_locks: dict[
         str,
         asyncio.Lock,
@@ -165,4 +169,21 @@ class RuntimeState:
         return (
             normalize_phone_number(phone)
             in self.temporary_authorized_numbers
+        )
+
+    def set_selected_model(
+        self,
+        phone: str,
+        model: str,
+    ) -> None:
+        self.selected_model_by_phone[
+            normalize_phone_number(phone)
+        ] = model
+
+    def get_selected_model(
+        self,
+        phone: str,
+    ) -> str | None:
+        return self.selected_model_by_phone.get(
+            normalize_phone_number(phone)
         )

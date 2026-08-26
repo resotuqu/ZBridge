@@ -42,6 +42,7 @@ async def ready(
         "plusofon_client",
         "incoming_sms_handler",
         "auth_command_handler",
+        "admin_command_handler",
     )
 
     missing_resources = [

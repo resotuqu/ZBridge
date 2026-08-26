@@ -26,6 +26,7 @@ from app.core.security import (
     is_phone_allowed,
     is_sms_loop,
     parse_auth_command,
+    parse_model_command,
     secrets_equal,
 )
 from app.schemas.plusofon import (
@@ -222,6 +223,62 @@ async def receive_incoming_sms(
             "Unauthorized phone ignored",
             extra={
                 "event": "auth_rejected",
+                "request_id": request_id,
+                "phone": message.sender,
+            },
+        )
+
+        return WebhookAcknowledgement()
+
+    model_command = parse_model_command(
+        message.content
+    )
+
+    if model_command is not None:
+        pin_candidate, model_name = model_command
+
+        if (
+            settings.master_pin is not None
+            and secrets_equal(
+                pin_candidate,
+                settings.master_pin.get_secret_value(),
+            )
+        ):
+            runtime_state.set_selected_model(
+                message.sender,
+                model_name,
+            )
+
+            logger.info(
+                "Model changed by admin command",
+                extra={
+                    "event": "admin_model_changed",
+                    "request_id": request_id,
+                    "phone": message.sender,
+                    "model": model_name,
+                },
+            )
+
+            admin_handler = getattr(
+                request.app.state,
+                "admin_command_handler",
+                None,
+            )
+
+            if admin_handler is not None:
+                background_tasks.add_task(
+                    admin_handler,
+                    message,
+                    request_id,
+                    model_name,
+                )
+
+            return WebhookAcknowledgement()
+
+        logger.warning(
+            "Admin command rejected",
+            extra={
+                "event": "admin_command_rejected",
                 "request_id": request_id,
                 "phone": message.sender,
             },
