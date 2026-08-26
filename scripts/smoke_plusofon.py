@@ -6,7 +6,7 @@ import ssl
 
 import httpx
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.security import (
     mask_phone_number,
@@ -63,6 +63,25 @@ def build_ssl_context(
     return context
 
 
+def build_plusofon_client(
+    http_client: httpx.AsyncClient,
+    settings: Settings,
+) -> PlusofonClient:
+    return PlusofonClient(
+        http_client,
+        token=(
+            settings
+            .plusofon_token
+            .get_secret_value()
+        ),
+        client_id=settings.plusofon_client_id,
+        number_id=settings.plusofon_number_id,
+        api_base_url=settings.plusofon_api_base_url,
+        own_number=settings.plusofon_number,
+        default_timezone=settings.timezone_info,
+    )
+
+
 async def run_smoke_test(
     recipient_argument: str,
     *,
@@ -114,22 +133,9 @@ async def run_smoke_test(
         timeout=timeout,
         verify=ssl_context,
     ) as http_client:
-        client = PlusofonClient(
+        client = build_plusofon_client(
             http_client,
-            token=(
-                settings
-                .plusofon_token
-                .get_secret_value()
-            ),
-            client_id=(
-                settings.plusofon_client_id
-            ),
-            number_id=(
-                settings.plusofon_number_id
-            ),
-            api_base_url=(
-                settings.plusofon_api_base_url
-            ),
+            settings,
         )
 
         try:

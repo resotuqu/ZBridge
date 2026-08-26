@@ -78,6 +78,7 @@ def test_webhook_generates_and_sends_reply() -> None:
             return_value=httpx.Response(
                 200,
                 json={
+                    "success": True,
                     "data": [],
                     "next_page_url": None,
                 },
@@ -88,6 +89,7 @@ def test_webhook_generates_and_sends_reply() -> None:
             return_value=httpx.Response(
                 200,
                 json={
+                    "success": True,
                     "data": [],
                     "next_page_url": None,
                 },

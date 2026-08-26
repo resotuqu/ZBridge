@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from functools import partial
 from typing import Generic, TypeVar
+from urllib.parse import urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -77,6 +78,7 @@ class _Page(BaseModel, Generic[_ItemT]):
         hide_input_in_errors=True,
     )
 
+    success: bool
     data: list[_ItemT]
     next_page_url: str | None = None
 
@@ -88,7 +90,7 @@ class _SMSHistoryItem(BaseModel):
     )
 
     created_datetime: datetime
-    sent_datetime: datetime
+    sent_datetime: datetime | None
     sender: str
     receiver: str
     msg: str
@@ -104,9 +106,10 @@ class _SMSDialogItem(BaseModel):
 
     sender: str
     receiver: str
-    sent_datetime: datetime
+    sent_datetime: datetime | None
     created_datetime: datetime
     msg: str
+    incoming: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +141,14 @@ class PlusofonClient:
         self._client_id = client_id
         self._number_id = number_id
         self._api_base_url = api_base_url.rstrip("/")
+        self._api_origin = self._parse_origin(
+            self._api_base_url
+        )
+        self._api_path_prefix = (
+            urlsplit(self._api_base_url)
+            .path.rstrip("/")
+            + "/"
+        )
         self._own_number = normalize_phone_number(
             own_number
         )
@@ -208,7 +219,7 @@ class PlusofonClient:
                 "text": text,
                 "number_id": self._number_id,
                 "to": int(recipient),
-                "reject_long": False,
+                "reject_long": True,
                 "count_pdu": True,
             },
         )
@@ -352,6 +363,7 @@ class PlusofonClient:
             ),
             sent_at=self._with_default_timezone(
                 item.sent_datetime
+                or item.created_datetime
             ),
             sender=item.sender,
             receiver=item.receiver,
@@ -370,13 +382,20 @@ class PlusofonClient:
             ),
             sent_at=self._with_default_timezone(
                 item.sent_datetime
+                or item.created_datetime
             ),
             sender=item.sender,
             receiver=item.receiver,
             text=item.msg,
             incoming=(
-                normalize_phone_number(item.receiver)
-                == self._own_number
+                item.incoming
+                if item.incoming is not None
+                else (
+                    normalize_phone_number(
+                        item.receiver
+                    )
+                    == self._own_number
+                )
             ),
             pdu=None,
         )
@@ -401,10 +420,18 @@ class PlusofonClient:
         items: list[_ItemT] = []
         next_url: str | None = url
         next_params: dict[str, str] | None = params
+        seen_urls: set[str] = set()
 
         for _ in range(_MAX_HISTORY_PAGES):
             if next_url is None:
-                break
+                return items
+
+            if next_url in seen_urls:
+                raise PlusofonError(
+                    "Plusofon pagination loop detected."
+                )
+
+            seen_urls.add(next_url)
 
             try:
                 page = await call_with_retries(
@@ -431,10 +458,19 @@ class PlusofonClient:
                 ) from exc
 
             items.extend(page.data)
-            next_url = page.next_page_url
+
+            if page.next_page_url is None:
+                return items
+
+            next_url = self._validated_pagination_url(
+                page.next_page_url,
+                current_url=next_url,
+            )
             next_params = None
 
-        return items
+        raise PlusofonError(
+            "Plusofon pagination limit exceeded."
+        )
 
     async def _fetch_page(
         self,
@@ -475,13 +511,77 @@ class PlusofonClient:
             )
 
         try:
-            return page_model.model_validate(
+            page = page_model.model_validate(
                 response.json()
             )
         except (ValueError, ValidationError) as exc:
             raise PlusofonError(
                 "Invalid Plusofon history response."
             ) from exc
+
+        if not page.success:
+            raise PlusofonError(
+                "Plusofon history request was rejected."
+            )
+
+        return page
+
+    @staticmethod
+    def _parse_origin(
+        url: str,
+    ) -> tuple[str, str, int]:
+        parsed = urlsplit(url)
+
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError(
+                "PLUSOFON_API_BASE_URL must be an "
+                "absolute HTTP(S) URL without credentials."
+            )
+
+        port = parsed.port
+
+        if port is None:
+            port = 443 if parsed.scheme == "https" else 80
+
+        return (
+            parsed.scheme,
+            parsed.hostname.lower(),
+            port,
+        )
+
+    def _validated_pagination_url(
+        self,
+        url: str,
+        *,
+        current_url: str,
+    ) -> str:
+        candidate = urljoin(current_url, url)
+        parsed = urlsplit(candidate)
+
+        try:
+            origin = self._parse_origin(candidate)
+        except ValueError as exc:
+            raise PlusofonError(
+                "Invalid Plusofon pagination URL."
+            ) from exc
+
+        if (
+            origin != self._api_origin
+            or not parsed.path.startswith(
+                self._api_path_prefix
+            )
+            or parsed.fragment
+        ):
+            raise PlusofonError(
+                "Unsafe Plusofon pagination URL."
+            )
+
+        return candidate
 
     @staticmethod
     def _log_retry(
