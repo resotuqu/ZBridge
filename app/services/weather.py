@@ -247,6 +247,7 @@ class OpenMeteoWeatherProvider:
                 "daily": "temperature_2m_min",
                 "forecast_days": 1,
                 "timezone": "auto",
+                "wind_speed_unit": "ms",
             },
             headers={"Accept": "application/json"},
         )

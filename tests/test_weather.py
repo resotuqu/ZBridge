@@ -120,6 +120,34 @@ async def test_get_weather_passes_geocoding_params() -> (
 
 
 @pytest.mark.asyncio
+async def test_get_weather_requests_wind_speed_in_ms() -> (
+    None
+):
+    """
+    Open-Meteo defaults to wind_speed_unit=kmh; the forecast
+    request must explicitly ask for m/s, otherwise the value
+    displayed as "м/с" would actually be km/h (~3.6x too
+    high).
+    """
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(GEOCODING_URL).mock(
+            return_value=geocoding_response()
+        )
+        route = mock.get(FORECAST_URL).mock(
+            return_value=forecast_response()
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            provider = build_provider(http_client)
+            await provider.get_weather("Якутск")
+
+    request = route.calls[0].request
+    assert (
+        request.url.params["wind_speed_unit"] == "ms"
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_weather_maps_known_wmo_codes() -> (
     None
 ):

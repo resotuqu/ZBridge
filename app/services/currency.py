@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Protocol
 
 import httpx
@@ -52,12 +52,22 @@ class CurrencyProvider(Protocol):
 
 
 class _FrankfurterRateResponse(BaseModel):
+    """
+    Schema of the v2 single-rate endpoint
+    (GET /v2/rate/{base}/{quote}), per
+    https://api.frankfurter.dev/v2/openapi.json --
+    a flat object with a top-level "rate", not the
+    older "rates" mapping.
+    """
+
     model_config = ConfigDict(
         extra="ignore",
         hide_input_in_errors=True,
     )
 
-    rates: dict[str, float] | None = None
+    base: str
+    quote: str
+    rate: Decimal
 
 
 def format_rate(value: Decimal) -> str:
@@ -159,7 +169,7 @@ class FrankfurterCurrencyProvider:
             headers={"Accept": "application/json"},
         )
 
-        if response.status_code in (400, 404):
+        if response.status_code in (400, 404, 422):
             raise CurrencyError(
                 "Unknown currency pair: "
                 f"{response.status_code}"
@@ -181,32 +191,39 @@ class FrankfurterCurrencyProvider:
             )
 
         try:
+            # model_validate_json (not model_validate on
+            # response.json()) so the "rate" Decimal field
+            # is parsed straight from the raw JSON number
+            # text, without an intermediate float.
             payload = (
-                _FrankfurterRateResponse.model_validate(
-                    response.json()
-                )
+                _FrankfurterRateResponse
+                .model_validate_json(response.text)
             )
         except (ValueError, ValidationError) as exc:
             raise CurrencyError(
                 "Invalid Frankfurter response."
             ) from exc
 
-        rate_value = (payload.rates or {}).get(quote)
+        rate_value = payload.rate
 
-        if rate_value is None:
+        if not rate_value.is_finite() or (
+            rate_value <= 0
+        ):
             raise CurrencyError(
-                "Missing exchange rate in response."
+                "Invalid exchange rate value."
             )
 
-        try:
-            rate = Decimal(str(rate_value))
-        except InvalidOperation as exc:
+        if (
+            payload.base.strip().upper() != base
+            or payload.quote.strip().upper() != quote
+        ):
             raise CurrencyError(
-                "Non-numeric exchange rate."
-            ) from exc
+                "Frankfurter response currency "
+                "mismatch."
+            )
 
         return CurrencyRate(
-            base=base, quote=quote, rate=rate
+            base=base, quote=quote, rate=rate_value
         )
 
     @staticmethod
