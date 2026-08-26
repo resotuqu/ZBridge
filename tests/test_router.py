@@ -11,6 +11,10 @@ from app.services.gigachat import (
     GigaChatModel,
     GigaChatTransientError,
 )
+from app.services.currency import (
+    CurrencyError,
+    CurrencyRate,
+)
 from app.services.message_router import (
     AI_FAILURE_MESSAGE,
     AUTH_SUCCESS_MESSAGE,
@@ -20,6 +24,9 @@ from app.services.message_router import (
     CLEAR_CONFIRMATION_MESSAGE,
     CONTINUATION_INSTRUCTION,
     CONTINUATION_UNAVAILABLE_MESSAGE,
+    CURRENCY_INVALID_CODE_MESSAGE,
+    CURRENCY_MISSING_ARGS_MESSAGE,
+    CURRENCY_UNAVAILABLE_MESSAGE,
     HELP_TEXT,
     LATIN_INSTRUCTION,
     LATIN_OFF_MESSAGE,
@@ -30,6 +37,9 @@ from app.services.message_router import (
     SMS_SYSTEM_PROMPT,
     STAT_UNAVAILABLE_MESSAGE,
     TRANSLATE_EMPTY_TEXT_MESSAGE,
+    WEATHER_EMPTY_CITY_MESSAGE,
+    WEATHER_NOT_FOUND_MESSAGE,
+    WEATHER_UNAVAILABLE_MESSAGE,
     WIKI_EMPTY_TOPIC_MESSAGE,
     WIKI_NOT_FOUND_MESSAGE,
     WIKI_UNAVAILABLE_MESSAGE,
@@ -39,6 +49,7 @@ from app.services.message_router import (
     CalcCommandProcessor,
     ClearCommandProcessor,
     ContinueCommandProcessor,
+    CurrencyCommandProcessor,
     HelpCommandProcessor,
     IncomingSMSProcessor,
     LatinCommandProcessor,
@@ -46,6 +57,7 @@ from app.services.message_router import (
     ModelsCommandProcessor,
     StatCommandProcessor,
     TranslateCommandProcessor,
+    WeatherCommandProcessor,
     WikiCommandProcessor,
     is_clear_command,
     is_continue_command,
@@ -53,12 +65,19 @@ from app.services.message_router import (
     is_models_command,
     is_stat_command,
     parse_calc_command,
+    parse_currency_command,
     parse_latin_command,
     parse_translate_command,
+    parse_weather_command,
     parse_wiki_command,
 )
 from app.services.plusofon import PlusofonError, SendResult, SMSMessage
 from app.services.sms_formatter import format_sms_answer
+from app.services.weather import (
+    WeatherError,
+    WeatherInfo,
+    WeatherNotFoundError,
+)
 from app.services.wikipedia import (
     WikipediaError,
     WikipediaNotFoundError,
@@ -189,6 +208,54 @@ class FakeWikipediaProvider:
 
         assert self.summary is not None
         return self.summary
+
+
+class FakeWeatherProvider:
+    def __init__(
+        self,
+        *,
+        weather: WeatherInfo | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.weather = weather
+        self.error = error
+        self.requested_cities: list[str] = []
+
+    async def get_weather(
+        self, city: str
+    ) -> WeatherInfo:
+        self.requested_cities.append(city)
+
+        if self.error is not None:
+            raise self.error
+
+        assert self.weather is not None
+        return self.weather
+
+
+class FakeCurrencyProvider:
+    def __init__(
+        self,
+        *,
+        rate: CurrencyRate | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.rate = rate
+        self.error = error
+        self.requested_pairs: list[
+            tuple[str, str]
+        ] = []
+
+    async def convert(
+        self, base: str, quote: str
+    ) -> CurrencyRate:
+        self.requested_pairs.append((base, quote))
+
+        if self.error is not None:
+            raise self.error
+
+        assert self.rate is not None
+        return self.rate
 
 
 def incoming_sms(content: str = "  Что такое VLAN?  ") -> IncomingSMS:
@@ -1944,6 +2011,370 @@ async def test_wiki_command_processor_reports_unavailable_on_timeout() -> None:
     ]
 
 
+# --- weather -------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("weather Якутск", "Якутск"),
+        ("WEATHER Москва", "Москва"),
+        ("  weather   London  ", "London"),
+        ("weather", ""),
+        ("weathervane Якутск", None),
+        ("моя weather погода", None),
+    ],
+)
+def test_parse_weather_command(
+    text: str, expected: str | None
+) -> None:
+    assert parse_weather_command(text) == expected
+
+
+@pytest.mark.asyncio
+async def test_weather_command_processor_sends_forecast() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    weather_provider = FakeWeatherProvider(
+        weather=WeatherInfo(
+            city="Якутск",
+            temperature_c=-18,
+            night_min_temperature_c=-23,
+            wind_speed_ms=3,
+            condition="облачно",
+        )
+    )
+    delivery = build_answer_delivery(provider)
+    processor = WeatherCommandProcessor(
+        weather_provider, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("weather Якутск"),
+        "request-weather-1",
+        "Якутск",
+    )
+
+    assert weather_provider.requested_cities == [
+        "Якутск"
+    ]
+    assert provider.sent == [
+        (
+            "71111111111",
+            "Якутск: -18°, облачно; ветер 3 м/с; "
+            "ночью -23°.",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_weather_command_processor_reports_empty_city() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    weather_provider = FakeWeatherProvider(
+        weather=WeatherInfo(
+            city="unused",
+            temperature_c=0,
+            night_min_temperature_c=0,
+            wind_speed_ms=0,
+            condition="ясно",
+        )
+    )
+    delivery = build_answer_delivery(provider)
+    processor = WeatherCommandProcessor(
+        weather_provider, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("weather"),
+        "request-weather-2",
+        "",
+    )
+
+    assert provider.sent == [
+        ("71111111111", WEATHER_EMPTY_CITY_MESSAGE)
+    ]
+    assert weather_provider.requested_cities == []
+
+
+@pytest.mark.asyncio
+async def test_weather_command_processor_reports_not_found() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    weather_provider = FakeWeatherProvider(
+        error=WeatherNotFoundError("missing")
+    )
+    delivery = build_answer_delivery(provider)
+    processor = WeatherCommandProcessor(
+        weather_provider, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("weather Абракадаброград"),
+        "request-weather-3",
+        "Абракадаброград",
+    )
+
+    assert provider.sent == [
+        ("71111111111", WEATHER_NOT_FOUND_MESSAGE)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_weather_command_processor_reports_unavailable_on_timeout() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    weather_provider = FakeWeatherProvider(
+        error=WeatherError("timeout")
+    )
+    delivery = build_answer_delivery(provider)
+    processor = WeatherCommandProcessor(
+        weather_provider, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("weather Якутск"),
+        "request-weather-4",
+        "Якутск",
+    )
+
+    assert provider.sent == [
+        ("71111111111", WEATHER_UNAVAILABLE_MESSAGE)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_weather_command_processor_serializes_per_phone() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    weather_provider = FakeWeatherProvider(
+        weather=WeatherInfo(
+            city="Якутск",
+            temperature_c=-18,
+            night_min_temperature_c=-23,
+            wind_speed_ms=3,
+            condition="облачно",
+        )
+    )
+    delivery = build_answer_delivery(provider)
+    processor = WeatherCommandProcessor(
+        weather_provider, delivery, runtime_state
+    )
+
+    import asyncio
+
+    await asyncio.gather(
+        processor(
+            incoming_sms("weather Якутск"),
+            "request-weather-5a",
+            "Якутск",
+        ),
+        processor(
+            incoming_sms("weather Якутск"),
+            "request-weather-5b",
+            "Якутск",
+        ),
+    )
+
+    assert len(provider.sent) == 2
+
+
+# --- currency --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("currency USD RUB", "USD RUB"),
+        ("CURRENCY eur rub", "eur rub"),
+        ("  currency   CNY   RUB  ", "CNY   RUB"),
+        ("currency", ""),
+        ("currencyxyz USD RUB", None),
+        ("моя currency USD", None),
+    ],
+)
+def test_parse_currency_command(
+    text: str, expected: str | None
+) -> None:
+    assert parse_currency_command(text) == expected
+
+
+@pytest.mark.asyncio
+async def test_currency_command_processor_sends_rate() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    currency_provider = FakeCurrencyProvider(
+        rate=CurrencyRate(
+            base="USD",
+            quote="RUB",
+            rate=Decimal("92.34"),
+        )
+    )
+    delivery = build_answer_delivery(provider)
+    processor = CurrencyCommandProcessor(
+        currency_provider, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("currency USD RUB"),
+        "request-currency-1",
+        "USD RUB",
+    )
+
+    assert currency_provider.requested_pairs == [
+        ("USD", "RUB")
+    ]
+    assert provider.sent == [
+        ("71111111111", "1 USD ≈ 92.34 RUB")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_currency_command_processor_normalizes_lowercase_input() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    currency_provider = FakeCurrencyProvider(
+        rate=CurrencyRate(
+            base="EUR",
+            quote="RUB",
+            rate=Decimal("100.5"),
+        )
+    )
+    delivery = build_answer_delivery(provider)
+    processor = CurrencyCommandProcessor(
+        currency_provider, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("currency eur rub"),
+        "request-currency-2",
+        "eur rub",
+    )
+
+    assert currency_provider.requested_pairs == [
+        ("EUR", "RUB")
+    ]
+    assert provider.sent == [
+        ("71111111111", "1 EUR ≈ 100.50 RUB")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_currency_command_processor_reports_missing_arguments() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    currency_provider = FakeCurrencyProvider(
+        rate=CurrencyRate(
+            base="USD",
+            quote="RUB",
+            rate=Decimal("92.34"),
+        )
+    )
+    delivery = build_answer_delivery(provider)
+    processor = CurrencyCommandProcessor(
+        currency_provider, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("currency USD"),
+        "request-currency-3",
+        "USD",
+    )
+
+    assert provider.sent == [
+        ("71111111111", CURRENCY_MISSING_ARGS_MESSAGE)
+    ]
+    assert currency_provider.requested_pairs == []
+
+
+@pytest.mark.asyncio
+async def test_currency_command_processor_reports_too_many_arguments() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    currency_provider = FakeCurrencyProvider()
+    delivery = build_answer_delivery(provider)
+    processor = CurrencyCommandProcessor(
+        currency_provider, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("currency USD RUB extra"),
+        "request-currency-4",
+        "USD RUB extra",
+    )
+
+    assert provider.sent == [
+        ("71111111111", CURRENCY_MISSING_ARGS_MESSAGE)
+    ]
+    assert currency_provider.requested_pairs == []
+
+
+@pytest.mark.asyncio
+async def test_currency_command_processor_reports_invalid_code() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    currency_provider = FakeCurrencyProvider()
+    delivery = build_answer_delivery(provider)
+    processor = CurrencyCommandProcessor(
+        currency_provider, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("currency US RUB"),
+        "request-currency-5",
+        "US RUB",
+    )
+
+    assert provider.sent == [
+        ("71111111111", CURRENCY_INVALID_CODE_MESSAGE)
+    ]
+    assert currency_provider.requested_pairs == []
+
+
+@pytest.mark.asyncio
+async def test_currency_command_processor_reports_unavailable_on_error() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    currency_provider = FakeCurrencyProvider(
+        error=CurrencyError("unavailable")
+    )
+    delivery = build_answer_delivery(provider)
+    processor = CurrencyCommandProcessor(
+        currency_provider, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("currency USD RUB"),
+        "request-currency-6",
+        "USD RUB",
+    )
+
+    assert provider.sent == [
+        ("71111111111", CURRENCY_UNAVAILABLE_MESSAGE)
+    ]
+
+
+def test_weather_and_currency_processors_never_depend_on_gigachat() -> None:
+    """
+    Neither weather nor currency data may come from
+    GigaChat -- assert the processors don't even hold a
+    ChatClient/MessageRouter dependency capable of issuing
+    a chat request.
+    """
+    import inspect
+
+    weather_params = inspect.signature(
+        WeatherCommandProcessor.__init__
+    ).parameters
+    currency_params = inspect.signature(
+        CurrencyCommandProcessor.__init__
+    ).parameters
+
+    for params in (weather_params, currency_params):
+        assert "chat_client" not in params
+        assert "message_router" not in params
+
+
 # --- context exclusion for the new commands ----------------------------
 
 
@@ -2190,6 +2621,140 @@ async def test_context_excludes_multi_segment_wiki_reply() -> None:
     assert not any(
         "DHCP" in content for content in contents
     )
+    assert "NAT — это трансляция адресов." in contents
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_weather_reply_even_though_forecast_is_dynamic() -> None:
+    dialog = [
+        make_message(
+            text="weather Якутск",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="Якутск: -18°, облачно; ветер 3 м/с; ночью -23°.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="NAT — это трансляция адресов.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 5, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(client, sms_provider)
+
+    await router.answer(incoming_sms(), "request-weather-context")
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    assert "weather Якутск" not in contents
+    assert not any(
+        "Якутск" in content for content in contents
+    )
+    assert "NAT — это трансляция адресов." in contents
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_currency_reply_even_though_rate_is_dynamic() -> None:
+    dialog = [
+        make_message(
+            text="currency USD RUB",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="1 USD ≈ 92.34 RUB",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="NAT — это трансляция адресов.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 5, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(client, sms_provider)
+
+    await router.answer(incoming_sms(), "request-currency-context")
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    assert "currency USD RUB" not in contents
+    assert "1 USD ≈ 92.34 RUB" not in contents
+    assert "NAT — это трансляция адресов." in contents
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_weather_and_currency_error_replies() -> None:
+    """
+    An error reply (e.g. "Погода сейчас недоступна :(")
+    must be hidden the same way a successful dynamic reply
+    is -- the whole exchange is hidden regardless of what
+    the outgoing SMS says.
+    """
+    dialog = [
+        make_message(
+            text="weather Абракадаброград",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text=WEATHER_NOT_FOUND_MESSAGE,
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="currency XXX YYY",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text=CURRENCY_UNAVAILABLE_MESSAGE,
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 2, tzinfo=UTC),
+        ),
+        make_message(
+            text="NAT — это трансляция адресов.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 2, 5, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(client, sms_provider)
+
+    await router.answer(incoming_sms(), "request-weather-currency-error")
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    assert "weather Абракадаброград" not in contents
+    assert WEATHER_NOT_FOUND_MESSAGE not in contents
+    assert "currency XXX YYY" not in contents
+    assert CURRENCY_UNAVAILABLE_MESSAGE not in contents
     assert "NAT — это трансляция адресов." in contents
 
 

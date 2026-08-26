@@ -1033,6 +1033,80 @@ def test_authorized_phone_wiki_command_routes_with_topic(
     assert wiki_received[0][2] == "DHCP"
 
 
+def test_authorized_phone_weather_command_routes_with_city(
+    webhook_app: FastAPI,
+) -> None:
+    weather_received: list[
+        tuple[IncomingSMS, str, str]
+    ] = []
+
+    async def weather_handler(
+        message: IncomingSMS,
+        request_id: str,
+        city: str,
+    ) -> None:
+        weather_received.append(
+            (message, request_id, city)
+        )
+
+    webhook_app.state.weather_command_handler = (
+        weather_handler
+    )
+
+    payload = valid_payload()
+    payload["content"] = "weather Якутск"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert len(weather_received) == 1
+    assert weather_received[0][2] == "Якутск"
+
+
+def test_authorized_phone_currency_command_routes_with_argument(
+    webhook_app: FastAPI,
+) -> None:
+    currency_received: list[
+        tuple[IncomingSMS, str, str]
+    ] = []
+
+    async def currency_handler(
+        message: IncomingSMS,
+        request_id: str,
+        argument: str,
+    ) -> None:
+        currency_received.append(
+            (message, request_id, argument)
+        )
+
+    webhook_app.state.currency_command_handler = (
+        currency_handler
+    )
+
+    payload = valid_payload()
+    payload["content"] = "currency USD RUB"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert len(currency_received) == 1
+    assert currency_received[0][2] == "USD RUB"
+
+
 def test_unauthorized_phone_cannot_use_new_tool_commands(
     webhook_app: FastAPI,
 ) -> None:
@@ -1041,6 +1115,8 @@ def test_unauthorized_phone_cannot_use_new_tool_commands(
         "calc": [],
         "translate": [],
         "wiki": [],
+        "weather": [],
+        "currency": [],
     }
 
     webhook_app.state.help_command_handler = (
@@ -1055,6 +1131,12 @@ def test_unauthorized_phone_cannot_use_new_tool_commands(
     webhook_app.state.wiki_command_handler = (
         _sync_handler(received, "wiki")
     )
+    webhook_app.state.weather_command_handler = (
+        _sync_handler(received, "weather")
+    )
+    webhook_app.state.currency_command_handler = (
+        _sync_handler(received, "currency")
+    )
 
     with TestClient(webhook_app) as client:
         for content in (
@@ -1062,6 +1144,8 @@ def test_unauthorized_phone_cannot_use_new_tool_commands(
             "calc 1+1",
             "translate Hello",
             "wiki DHCP",
+            "weather Якутск",
+            "currency USD RUB",
         ):
             payload = valid_payload()
             payload["src_number"] = "73333333333"
@@ -1082,6 +1166,8 @@ def test_unauthorized_phone_cannot_use_new_tool_commands(
         "calc": [],
         "translate": [],
         "wiki": [],
+        "weather": [],
+        "currency": [],
     }
 
 

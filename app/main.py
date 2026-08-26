@@ -16,6 +16,9 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.runtime_state import RuntimeState
 from app.services.gigachat import GigaChatClient
+from app.services.currency import (
+    FrankfurterCurrencyProvider,
+)
 from app.services.message_router import (
     AdminCommandProcessor,
     AnswerDelivery,
@@ -23,6 +26,7 @@ from app.services.message_router import (
     CalcCommandProcessor,
     ClearCommandProcessor,
     ContinueCommandProcessor,
+    CurrencyCommandProcessor,
     HelpCommandProcessor,
     IncomingSMSProcessor,
     LatinCommandProcessor,
@@ -30,9 +34,11 @@ from app.services.message_router import (
     ModelsCommandProcessor,
     StatCommandProcessor,
     TranslateCommandProcessor,
+    WeatherCommandProcessor,
     WikiCommandProcessor,
 )
 from app.services.plusofon import PlusofonClient
+from app.services.weather import OpenMeteoWeatherProvider
 from app.services.wikipedia import WikipediaProvider
 
 
@@ -220,6 +226,30 @@ async def lifespan(
             application.state.runtime_state,
         )
 
+        weather_provider = OpenMeteoWeatherProvider(
+            http_client
+        )
+
+        currency_provider = FrankfurterCurrencyProvider(
+            http_client
+        )
+
+        weather_command_processor = (
+            WeatherCommandProcessor(
+                weather_provider,
+                answer_delivery,
+                application.state.runtime_state,
+            )
+        )
+
+        currency_command_processor = (
+            CurrencyCommandProcessor(
+                currency_provider,
+                answer_delivery,
+                application.state.runtime_state,
+            )
+        )
+
         application.state.http_client = http_client
         application.state.gigachat_client = (
             gigachat_client
@@ -271,6 +301,18 @@ async def lifespan(
         )
         application.state.wiki_command_processor = (
             wiki_command_processor
+        )
+        application.state.weather_provider = (
+            weather_provider
+        )
+        application.state.currency_provider = (
+            currency_provider
+        )
+        application.state.weather_command_processor = (
+            weather_command_processor
+        )
+        application.state.currency_command_processor = (
+            currency_command_processor
         )
 
         _install_handler(
@@ -369,6 +411,22 @@ async def lifespan(
             ),
             processor=wiki_command_processor,
         )
+        _install_handler(
+            application,
+            state_attr="weather_command_handler",
+            managed_attr=(
+                "managed_weather_command_handler"
+            ),
+            processor=weather_command_processor,
+        )
+        _install_handler(
+            application,
+            state_attr="currency_command_handler",
+            managed_attr=(
+                "managed_currency_command_handler"
+            ),
+            processor=currency_command_processor,
+        )
 
         logger.info(
             "Application resources started",
@@ -450,6 +508,14 @@ def create_app() -> FastAPI:
     )
     application.state.wiki_command_handler = None
     application.state.managed_wiki_command_handler = (
+        None
+    )
+    application.state.weather_command_handler = None
+    application.state.managed_weather_command_handler = (
+        None
+    )
+    application.state.currency_command_handler = None
+    application.state.managed_currency_command_handler = (
         None
     )
 

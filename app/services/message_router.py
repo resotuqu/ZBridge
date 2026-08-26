@@ -30,6 +30,13 @@ from app.services.calculator import (
 from app.services.calculator import (
     format_result as format_calc_result,
 )
+from app.services.currency import (
+    CurrencyError,
+    CurrencyProvider,
+    CurrencyRate,
+    format_rate as format_currency_value,
+    is_valid_currency_code,
+)
 from app.services.gigachat import (
     GigaChatError,
     GigaChatModel,
@@ -40,6 +47,12 @@ from app.services.plusofon import (
     SMSMessage,
 )
 from app.services.sms_formatter import format_sms_answer
+from app.services.weather import (
+    WeatherError,
+    WeatherInfo,
+    WeatherNotFoundError,
+    WeatherProvider,
+)
 from app.services.wikipedia import (
     WikipediaError,
     WikipediaNotFoundError,
@@ -94,6 +107,22 @@ WIKI_UNAVAILABLE_MESSAGE = (
 )
 _WIKI_SUMMARY_LIMIT = 400
 
+WEATHER_EMPTY_CITY_MESSAGE = (
+    "Укажите город: weather <город>."
+)
+WEATHER_NOT_FOUND_MESSAGE = "Город не найден."
+WEATHER_UNAVAILABLE_MESSAGE = (
+    "Погода сейчас недоступна :("
+)
+
+CURRENCY_MISSING_ARGS_MESSAGE = (
+    "Укажите валюты: currency USD RUB."
+)
+CURRENCY_INVALID_CODE_MESSAGE = "Неверный код валюты."
+CURRENCY_UNAVAILABLE_MESSAGE = (
+    "Курс сейчас недоступен :("
+)
+
 SMS_SYSTEM_PROMPT = """Ты отвечаешь пользователю через обычные SMS.
 
 Правила:
@@ -143,6 +172,14 @@ _TRANSLATE_RE = re.compile(
 )
 _WIKI_RE = re.compile(
     r"^\s*wiki(?:\s+(.*))?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_WEATHER_RE = re.compile(
+    r"^\s*weather(?:\s+(.*))?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_CURRENCY_RE = re.compile(
+    r"^\s*currency(?:\s+(.*))?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 _TRANSLATE_LANG_RE = re.compile(
@@ -211,6 +248,24 @@ def parse_wiki_command(text: str) -> str | None:
     return (match.group(1) or "").strip()
 
 
+def parse_weather_command(text: str) -> str | None:
+    match = _WEATHER_RE.match(text)
+
+    if match is None:
+        return None
+
+    return (match.group(1) or "").strip()
+
+
+def parse_currency_command(text: str) -> str | None:
+    match = _CURRENCY_RE.match(text)
+
+    if match is None:
+        return None
+
+    return (match.group(1) or "").strip()
+
+
 def _split_translate_target(
     argument: str,
 ) -> tuple[str | None, str]:
@@ -248,6 +303,23 @@ def _truncate_summary(
         return truncated[: boundary + 1].strip()
 
     return truncated.rstrip() + "…"
+
+
+def _format_weather(info: WeatherInfo) -> str:
+    return (
+        f"{info.city}: {info.temperature_c}°, "
+        f"{info.condition}; "
+        f"ветер {info.wind_speed_ms} м/с; "
+        f"ночью {info.night_min_temperature_c}°."
+    )
+
+
+def _format_currency(rate: CurrencyRate) -> str:
+    return (
+        f"1 {rate.base} ≈ "
+        f"{format_currency_value(rate.rate)} "
+        f"{rate.quote}"
+    )
 
 
 def _generation_model_ids(
@@ -292,6 +364,12 @@ def _service_notification_texts() -> set[str]:
         WIKI_EMPTY_TOPIC_MESSAGE,
         WIKI_NOT_FOUND_MESSAGE,
         WIKI_UNAVAILABLE_MESSAGE,
+        WEATHER_EMPTY_CITY_MESSAGE,
+        WEATHER_NOT_FOUND_MESSAGE,
+        WEATHER_UNAVAILABLE_MESSAGE,
+        CURRENCY_MISSING_ARGS_MESSAGE,
+        CURRENCY_INVALID_CODE_MESSAGE,
+        CURRENCY_UNAVAILABLE_MESSAGE,
     }
 
 
@@ -342,17 +420,24 @@ def _is_service_message(text: str) -> bool:
     if parse_wiki_command(normalized) is not None:
         return True
 
+    if parse_weather_command(normalized) is not None:
+        return True
+
+    if parse_currency_command(normalized) is not None:
+        return True
+
     return False
 
 
 def _is_hidden_exchange_command(text: str) -> bool:
     """
     Commands whose outgoing reply is dynamic (calc result,
-    translation, wiki summary) and therefore cannot be
-    recognized by matching fixed reply text. The whole
-    exchange -- the command and every outgoing SMS up to
-    the next incoming message -- must be hidden from the
-    GigaChat context regardless of what that reply says.
+    translation, wiki summary, weather, exchange rate) and
+    therefore cannot be recognized by matching fixed reply
+    text. The whole exchange -- the command and every
+    outgoing SMS up to the next incoming message -- must be
+    hidden from the GigaChat context regardless of what
+    that reply says.
     """
     if is_help_command(text):
         return True
@@ -364,6 +449,12 @@ def _is_hidden_exchange_command(text: str) -> bool:
         return True
 
     if parse_wiki_command(text) is not None:
+        return True
+
+    if parse_weather_command(text) is not None:
+        return True
+
+    if parse_currency_command(text) is not None:
         return True
 
     return False
@@ -1336,6 +1427,161 @@ class WikiCommandProcessor:
             return WIKI_UNAVAILABLE_MESSAGE
 
         return _truncate_summary(summary)
+
+
+class WeatherCommandProcessor:
+    def __init__(
+        self,
+        weather_provider: WeatherProvider,
+        answer_delivery: AnswerDelivery,
+        runtime_state: RuntimeState,
+    ) -> None:
+        self._weather_provider = weather_provider
+        self._answer_delivery = answer_delivery
+        self._runtime_state = runtime_state
+
+    async def __call__(
+        self,
+        message: IncomingSMS,
+        request_id: str,
+        city: str,
+    ) -> None:
+        phone_lock = self._runtime_state.get_phone_lock(
+            message.sender
+        )
+
+        async with phone_lock:
+            text = await self._build_reply(
+                request_id, message.sender, city
+            )
+
+            try:
+                await self._answer_delivery.send_answer(
+                    message.sender, text
+                )
+            except PlusofonError as exc:
+                logger.error(
+                    "Outgoing SMS failed",
+                    extra={
+                        "event": "plusofon_error",
+                        "request_id": request_id,
+                        "phone": message.sender,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+    async def _build_reply(
+        self,
+        request_id: str,
+        phone: str,
+        city: str,
+    ) -> str:
+        if not city.strip():
+            return WEATHER_EMPTY_CITY_MESSAGE
+
+        try:
+            weather = (
+                await self
+                ._weather_provider
+                .get_weather(city)
+            )
+        except WeatherNotFoundError:
+            return WEATHER_NOT_FOUND_MESSAGE
+        except WeatherError as exc:
+            logger.error(
+                "Weather lookup failed",
+                extra={
+                    "event": "weather_error",
+                    "request_id": request_id,
+                    "phone": phone,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return WEATHER_UNAVAILABLE_MESSAGE
+
+        return _format_weather(weather)
+
+
+class CurrencyCommandProcessor:
+    def __init__(
+        self,
+        currency_provider: CurrencyProvider,
+        answer_delivery: AnswerDelivery,
+        runtime_state: RuntimeState,
+    ) -> None:
+        self._currency_provider = currency_provider
+        self._answer_delivery = answer_delivery
+        self._runtime_state = runtime_state
+
+    async def __call__(
+        self,
+        message: IncomingSMS,
+        request_id: str,
+        argument: str,
+    ) -> None:
+        phone_lock = self._runtime_state.get_phone_lock(
+            message.sender
+        )
+
+        async with phone_lock:
+            text = await self._build_reply(
+                request_id, message.sender, argument
+            )
+
+            try:
+                await self._answer_delivery.send_answer(
+                    message.sender, text
+                )
+            except PlusofonError as exc:
+                logger.error(
+                    "Outgoing SMS failed",
+                    extra={
+                        "event": "plusofon_error",
+                        "request_id": request_id,
+                        "phone": message.sender,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+    async def _build_reply(
+        self,
+        request_id: str,
+        phone: str,
+        argument: str,
+    ) -> str:
+        parts = argument.split()
+
+        if len(parts) != 2:
+            return CURRENCY_MISSING_ARGS_MESSAGE
+
+        base, quote = parts
+
+        if not is_valid_currency_code(
+            base
+        ) or not is_valid_currency_code(quote):
+            return CURRENCY_INVALID_CODE_MESSAGE
+
+        try:
+            rate = (
+                await self
+                ._currency_provider
+                .convert(
+                    base.upper(), quote.upper()
+                )
+            )
+        except CurrencyError as exc:
+            logger.error(
+                "Currency lookup failed",
+                extra={
+                    "event": "currency_error",
+                    "request_id": request_id,
+                    "phone": phone,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return CURRENCY_UNAVAILABLE_MESSAGE
+
+        return _format_currency(rate)
 
 
 class ClearCommandProcessor:

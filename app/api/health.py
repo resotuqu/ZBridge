@@ -52,6 +52,8 @@ async def ready(
         "calc_command_handler",
         "translate_command_handler",
         "wiki_command_handler",
+        "weather_command_handler",
+        "currency_command_handler",
     )
 
     missing_resources = [
