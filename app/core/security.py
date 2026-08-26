@@ -10,6 +10,10 @@ _AUTH_COMMAND_RE = re.compile(
     r"^\s*(\S+)\s+auth\s*$",
     re.IGNORECASE,
 )
+_MODEL_COMMAND_RE = re.compile(
+    r"^\s*(\S+)\s+model\s+(\S+)\s*$",
+    re.IGNORECASE,
+)
 
 
 def normalize_phone_number(value: str | int) -> str:
@@ -58,6 +62,18 @@ def parse_auth_command(text: str) -> str | None:
         return None
 
     return match.group(1)
+
+
+def parse_model_command(
+    text: str,
+) -> tuple[str, str] | None:
+    """Return (pin_candidate, model_name) for a "<PIN> model <name>" command."""
+    match = _MODEL_COMMAND_RE.match(text)
+
+    if match is None:
+        return None
+
+    return match.group(1), match.group(2)
 
 
 def secrets_equal(candidate: str, expected: str) -> bool:

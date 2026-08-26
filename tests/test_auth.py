@@ -6,6 +6,7 @@ from app.core.security import (
     mask_phone_number,
     normalize_phone_number,
     parse_auth_command,
+    parse_model_command,
 )
 
 
@@ -103,3 +104,38 @@ def test_parse_auth_command_rejects(
     text: str,
 ) -> None:
     assert parse_auth_command(text) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "8241 model GigaChat-2-Pro",
+            ("8241", "GigaChat-2-Pro"),
+        ),
+        (
+            "  8241   MODEL   GigaChat-2-Pro  ",
+            ("8241", "GigaChat-2-Pro"),
+        ),
+    ],
+)
+def test_parse_model_command_matches(
+    text: str,
+    expected: tuple[str, str],
+) -> None:
+    assert parse_model_command(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "model GigaChat-2-Pro",
+        "8241 model",
+        "8241 model a b",
+        "Что такое VLAN?",
+    ],
+)
+def test_parse_model_command_rejects(
+    text: str,
+) -> None:
+    assert parse_model_command(text) is None

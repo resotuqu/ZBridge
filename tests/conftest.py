@@ -13,6 +13,7 @@ _TEST_ENV = {
     ),
     "ALLOWED_PHONE_NUMBERS": "71111111111",
     "AUTH_PIN": "9999",
+    "MASTER_PIN": "8241",
 }
 
 

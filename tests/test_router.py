@@ -2,13 +2,16 @@ from datetime import UTC, datetime
 
 import pytest
 
+from app.core.runtime_state import RuntimeState
 from app.schemas.messages import ChatMessage, ChatRole, IncomingSMS
 from app.services.gigachat import GigaChatTransientError
 from app.services.message_router import (
     AI_FAILURE_MESSAGE,
     AUTH_SUCCESS_MESSAGE,
     SMS_SYSTEM_PROMPT,
+    AdminCommandProcessor,
     AuthCommandProcessor,
+    IncomingSMSProcessor,
     MessageRouter,
 )
 from app.services.plusofon import PlusofonError, SendResult
@@ -149,3 +152,102 @@ async def test_auth_command_processor_swallows_send_failure() -> None:
         incoming_sms(),
         "request-4",
     )
+
+
+@pytest.mark.asyncio
+async def test_router_uses_model_override_when_given() -> None:
+    client = FakeChatClient(result="ответ")
+    router = MessageRouter(
+        client,
+        model="GigaChat-3-Ultra",
+    )
+
+    await router.answer(
+        incoming_sms(),
+        "request-5",
+        model="GigaChat-2-Pro",
+    )
+
+    assert client.model == "GigaChat-2-Pro"
+
+
+@pytest.mark.asyncio
+async def test_admin_command_processor_sends_confirmation() -> None:
+    provider = FakeSMSProvider()
+    processor = AdminCommandProcessor(provider)
+
+    await processor(
+        incoming_sms(),
+        "request-6",
+        "GigaChat-2-Pro",
+    )
+
+    assert provider.sent == [
+        ("71111111111", "Модель: GigaChat-2-Pro")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_admin_command_processor_swallows_send_failure() -> None:
+    provider = FakeSMSProvider(
+        error=PlusofonError("send failed")
+    )
+    processor = AdminCommandProcessor(provider)
+
+    await processor(
+        incoming_sms(),
+        "request-7",
+        "GigaChat-2-Pro",
+    )
+
+
+@pytest.mark.asyncio
+async def test_incoming_sms_processor_uses_selected_model() -> None:
+    client = FakeChatClient(result="ответ")
+    router = MessageRouter(
+        client,
+        model="GigaChat-3-Ultra",
+    )
+    sms_provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    runtime_state.set_selected_model(
+        "71111111111",
+        "GigaChat-2-Pro",
+    )
+
+    processor = IncomingSMSProcessor(
+        router,
+        sms_provider,
+        runtime_state,
+    )
+
+    await processor(
+        incoming_sms(),
+        "request-8",
+    )
+
+    assert client.model == "GigaChat-2-Pro"
+
+
+@pytest.mark.asyncio
+async def test_incoming_sms_processor_uses_default_model_without_selection() -> None:
+    client = FakeChatClient(result="ответ")
+    router = MessageRouter(
+        client,
+        model="GigaChat-3-Ultra",
+    )
+    sms_provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+
+    processor = IncomingSMSProcessor(
+        router,
+        sms_provider,
+        runtime_state,
+    )
+
+    await processor(
+        incoming_sms(),
+        "request-9",
+    )
+
+    assert client.model == "GigaChat-3-Ultra"

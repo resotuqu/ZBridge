@@ -17,6 +17,7 @@ from app.core.logging import configure_logging
 from app.core.runtime_state import RuntimeState
 from app.services.gigachat import GigaChatClient
 from app.services.message_router import (
+    AdminCommandProcessor,
     AuthCommandProcessor,
     IncomingSMSProcessor,
     MessageRouter,
@@ -98,6 +99,10 @@ async def lifespan(
             plusofon_client
         )
 
+        admin_command_processor = AdminCommandProcessor(
+            plusofon_client
+        )
+
         application.state.http_client = http_client
         application.state.gigachat_client = (
             gigachat_client
@@ -113,6 +118,9 @@ async def lifespan(
         )
         application.state.auth_command_processor = (
             auth_command_processor
+        )
+        application.state.admin_command_processor = (
+            admin_command_processor
         )
 
         current_handler = (
@@ -156,6 +164,28 @@ async def lifespan(
 
         application.state.managed_auth_command_handler = (
             auth_command_processor
+        )
+
+        current_admin_handler = (
+            application.state.admin_command_handler
+        )
+        managed_admin_handler = (
+            application
+            .state
+            .managed_admin_command_handler
+        )
+
+        if (
+            current_admin_handler is None
+            or current_admin_handler
+            is managed_admin_handler
+        ):
+            application.state.admin_command_handler = (
+                admin_command_processor
+            )
+
+        application.state.managed_admin_command_handler = (
+            admin_command_processor
         )
 
         logger.info(
@@ -206,6 +236,8 @@ def create_app() -> FastAPI:
     application.state.managed_incoming_sms_handler = None
     application.state.auth_command_handler = None
     application.state.managed_auth_command_handler = None
+    application.state.admin_command_handler = None
+    application.state.managed_admin_command_handler = None
 
     application.include_router(health_router)
     application.include_router(

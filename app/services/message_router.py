@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 AI_FAILURE_MESSAGE = "ИИ поломался :("
 AUTH_SUCCESS_MESSAGE = "Доступ разрешён до перезапуска."
+MODEL_CHANGE_MESSAGE_TEMPLATE = "Модель: {model}"
 
 SMS_SYSTEM_PROMPT = """Ты отвечаешь пользователю через обычные SMS.
 
@@ -66,7 +67,11 @@ class MessageRouter:
         self,
         message: IncomingSMS,
         request_id: str,
+        *,
+        model: str | None = None,
     ) -> str:
+        effective_model = model or self._model
+
         messages = [
             ChatMessage(
                 role=ChatRole.SYSTEM,
@@ -84,14 +89,14 @@ class MessageRouter:
                 "event": "gigachat_request",
                 "request_id": request_id,
                 "phone": message.sender,
-                "model": self._model,
+                "model": effective_model,
             },
         )
 
         try:
             answer = await self._chat_client.chat(
                 messages,
-                model=self._model,
+                model=effective_model,
             )
         except GigaChatError as exc:
             logger.error(
@@ -100,7 +105,7 @@ class MessageRouter:
                     "event": "gigachat_error",
                     "request_id": request_id,
                     "phone": message.sender,
-                    "model": self._model,
+                    "model": effective_model,
                     "error_type": type(exc).__name__,
                 },
             )
@@ -112,7 +117,7 @@ class MessageRouter:
                 "event": "gigachat_response",
                 "request_id": request_id,
                 "phone": message.sender,
-                "model": self._model,
+                "model": effective_model,
             },
         )
 
@@ -148,6 +153,38 @@ class AuthCommandProcessor:
             )
 
 
+class AdminCommandProcessor:
+    def __init__(
+        self,
+        sms_provider: SMSProvider,
+    ) -> None:
+        self._sms_provider = sms_provider
+
+    async def __call__(
+        self,
+        message: IncomingSMS,
+        request_id: str,
+        model: str,
+    ) -> None:
+        try:
+            await self._sms_provider.send(
+                message.sender,
+                MODEL_CHANGE_MESSAGE_TEMPLATE.format(
+                    model=model
+                ),
+            )
+        except PlusofonError as exc:
+            logger.error(
+                "Admin confirmation SMS failed",
+                extra={
+                    "event": "plusofon_error",
+                    "request_id": request_id,
+                    "phone": message.sender,
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+
 class IncomingSMSProcessor:
     def __init__(
         self,
@@ -169,10 +206,17 @@ class IncomingSMSProcessor:
             message.sender
         )
 
+        effective_model = (
+            self._runtime_state.get_selected_model(
+                message.sender
+            )
+        )
+
         async with phone_lock:
             answer = await self._message_router.answer(
                 message,
                 request_id,
+                model=effective_model,
             )
 
             try:
