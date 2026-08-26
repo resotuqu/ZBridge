@@ -479,3 +479,161 @@ def test_unknown_phone_cannot_use_master_pin(
 
     assert response.status_code == 200
     assert admin_received == []
+
+
+def test_authorized_phone_clear_command_sets_boundary(
+    webhook_app: FastAPI,
+) -> None:
+    clear_received: list[
+        tuple[IncomingSMS, str]
+    ] = []
+
+    async def clear_handler(
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        clear_received.append(
+            (message, request_id)
+        )
+
+    webhook_app.state.clear_command_handler = (
+        clear_handler
+    )
+
+    payload = valid_payload()
+    payload["content"] = "clear"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert len(clear_received) == 1
+    assert (
+        clear_received[0][0].sender
+        == "71111111111"
+    )
+    assert (
+        webhook_app.state.runtime_state
+        .get_context_boundary("71111111111")
+        is not None
+    )
+
+
+def test_authorized_phone_stat_command_routes(
+    webhook_app: FastAPI,
+) -> None:
+    stat_received: list[
+        tuple[IncomingSMS, str]
+    ] = []
+
+    async def stat_handler(
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        stat_received.append(
+            (message, request_id)
+        )
+
+    webhook_app.state.stat_command_handler = (
+        stat_handler
+    )
+
+    payload = valid_payload()
+    payload["content"] = "stat"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert len(stat_received) == 1
+    assert (
+        stat_received[0][0].sender
+        == "71111111111"
+    )
+
+
+def test_authorized_phone_continue_command_routes(
+    webhook_app: FastAPI,
+) -> None:
+    continue_received: list[
+        tuple[IncomingSMS, str]
+    ] = []
+
+    async def continue_handler(
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        continue_received.append(
+            (message, request_id)
+        )
+
+    webhook_app.state.continue_command_handler = (
+        continue_handler
+    )
+
+    payload = valid_payload()
+    payload["content"] = "+"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert len(continue_received) == 1
+    assert (
+        continue_received[0][0].sender
+        == "71111111111"
+    )
+
+
+def test_unauthorized_phone_cannot_use_stat_command(
+    webhook_app: FastAPI,
+) -> None:
+    stat_received: list[
+        tuple[IncomingSMS, str]
+    ] = []
+
+    async def stat_handler(
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        stat_received.append(
+            (message, request_id)
+        )
+
+    webhook_app.state.stat_command_handler = (
+        stat_handler
+    )
+
+    payload = valid_payload()
+    payload["src_number"] = "73333333333"
+    payload["content"] = "stat"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert stat_received == []

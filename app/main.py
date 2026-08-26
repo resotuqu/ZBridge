@@ -19,8 +19,11 @@ from app.services.gigachat import GigaChatClient
 from app.services.message_router import (
     AdminCommandProcessor,
     AuthCommandProcessor,
+    ClearCommandProcessor,
+    ContinueCommandProcessor,
     IncomingSMSProcessor,
     MessageRouter,
+    StatCommandProcessor,
 )
 from app.services.plusofon import PlusofonClient
 
@@ -39,6 +42,33 @@ def build_ssl_context(
         )
 
     return context
+
+
+def _install_handler(
+    application: FastAPI,
+    *,
+    state_attr: str,
+    managed_attr: str,
+    processor: object,
+) -> None:
+    current_handler = getattr(
+        application.state, state_attr
+    )
+    managed_handler = getattr(
+        application.state, managed_attr
+    )
+
+    if (
+        current_handler is None
+        or current_handler is managed_handler
+    ):
+        setattr(
+            application.state, state_attr, processor
+        )
+
+    setattr(
+        application.state, managed_attr, processor
+    )
 
 
 @asynccontextmanager
@@ -82,11 +112,18 @@ async def lifespan(
             api_base_url=(
                 settings.plusofon_api_base_url
             ),
+            own_number=settings.plusofon_number,
+            default_timezone=settings.timezone_info,
         )
 
         message_router = MessageRouter(
             gigachat_client,
+            plusofon_client,
+            application.state.runtime_state,
             model=settings.gigachat_model,
+            max_context_messages=(
+                settings.max_context_messages
+            ),
         )
 
         sms_processor = IncomingSMSProcessor(
@@ -101,6 +138,26 @@ async def lifespan(
 
         admin_command_processor = AdminCommandProcessor(
             plusofon_client
+        )
+
+        clear_command_processor = ClearCommandProcessor(
+            plusofon_client
+        )
+
+        stat_command_processor = StatCommandProcessor(
+            plusofon_client,
+            application.state.runtime_state,
+            default_model=settings.gigachat_model,
+            sms_price_rub=settings.sms_price_rub,
+            timezone=settings.timezone_info,
+        )
+
+        continue_command_processor = (
+            ContinueCommandProcessor(
+                message_router,
+                plusofon_client,
+                application.state.runtime_state,
+            )
         )
 
         application.state.http_client = http_client
@@ -122,70 +179,63 @@ async def lifespan(
         application.state.admin_command_processor = (
             admin_command_processor
         )
-
-        current_handler = (
-            application.state.incoming_sms_handler
+        application.state.clear_command_processor = (
+            clear_command_processor
         )
-        managed_handler = (
-            application
-            .state
-            .managed_incoming_sms_handler
+        application.state.stat_command_processor = (
+            stat_command_processor
         )
-
-        if (
-            current_handler is None
-            or current_handler is managed_handler
-        ):
-            application.state.incoming_sms_handler = (
-                sms_processor
-            )
-
-        application.state.managed_incoming_sms_handler = (
-            sms_processor
+        application.state.continue_command_processor = (
+            continue_command_processor
         )
 
-        current_auth_handler = (
-            application.state.auth_command_handler
+        _install_handler(
+            application,
+            state_attr="incoming_sms_handler",
+            managed_attr=(
+                "managed_incoming_sms_handler"
+            ),
+            processor=sms_processor,
         )
-        managed_auth_handler = (
-            application
-            .state
-            .managed_auth_command_handler
+        _install_handler(
+            application,
+            state_attr="auth_command_handler",
+            managed_attr=(
+                "managed_auth_command_handler"
+            ),
+            processor=auth_command_processor,
         )
-
-        if (
-            current_auth_handler is None
-            or current_auth_handler
-            is managed_auth_handler
-        ):
-            application.state.auth_command_handler = (
-                auth_command_processor
-            )
-
-        application.state.managed_auth_command_handler = (
-            auth_command_processor
+        _install_handler(
+            application,
+            state_attr="admin_command_handler",
+            managed_attr=(
+                "managed_admin_command_handler"
+            ),
+            processor=admin_command_processor,
         )
-
-        current_admin_handler = (
-            application.state.admin_command_handler
+        _install_handler(
+            application,
+            state_attr="clear_command_handler",
+            managed_attr=(
+                "managed_clear_command_handler"
+            ),
+            processor=clear_command_processor,
         )
-        managed_admin_handler = (
-            application
-            .state
-            .managed_admin_command_handler
+        _install_handler(
+            application,
+            state_attr="stat_command_handler",
+            managed_attr=(
+                "managed_stat_command_handler"
+            ),
+            processor=stat_command_processor,
         )
-
-        if (
-            current_admin_handler is None
-            or current_admin_handler
-            is managed_admin_handler
-        ):
-            application.state.admin_command_handler = (
-                admin_command_processor
-            )
-
-        application.state.managed_admin_command_handler = (
-            admin_command_processor
+        _install_handler(
+            application,
+            state_attr="continue_command_handler",
+            managed_attr=(
+                "managed_continue_command_handler"
+            ),
+            processor=continue_command_processor,
         )
 
         logger.info(
@@ -238,6 +288,14 @@ def create_app() -> FastAPI:
     application.state.managed_auth_command_handler = None
     application.state.admin_command_handler = None
     application.state.managed_admin_command_handler = None
+    application.state.clear_command_handler = None
+    application.state.managed_clear_command_handler = None
+    application.state.stat_command_handler = None
+    application.state.managed_stat_command_handler = None
+    application.state.continue_command_handler = None
+    application.state.managed_continue_command_handler = (
+        None
+    )
 
     application.include_router(health_router)
     application.include_router(

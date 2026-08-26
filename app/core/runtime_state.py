@@ -133,6 +133,16 @@ class RuntimeState:
         default_factory=dict
     )
 
+    clear_context_after_by_phone: dict[
+        str, datetime
+    ] = field(default_factory=dict)
+
+    gigachat_requests_total: int = 0
+
+    gigachat_requests_by_model: dict[str, int] = field(
+        default_factory=dict
+    )
+
     per_phone_locks: dict[
         str,
         asyncio.Lock,
@@ -186,4 +196,31 @@ class RuntimeState:
     ) -> str | None:
         return self.selected_model_by_phone.get(
             normalize_phone_number(phone)
+        )
+
+    def set_context_boundary(
+        self,
+        phone: str,
+        at: datetime,
+    ) -> None:
+        self.clear_context_after_by_phone[
+            normalize_phone_number(phone)
+        ] = at
+
+    def get_context_boundary(
+        self,
+        phone: str,
+    ) -> datetime | None:
+        return self.clear_context_after_by_phone.get(
+            normalize_phone_number(phone)
+        )
+
+    def record_gigachat_request(
+        self,
+        model: str,
+    ) -> None:
+        self.gigachat_requests_total += 1
+        self.gigachat_requests_by_model[model] = (
+            self.gigachat_requests_by_model.get(model, 0)
+            + 1
         )
