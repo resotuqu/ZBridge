@@ -16,6 +16,7 @@ from app.services.message_router import (
     SMS_SYSTEM_PROMPT,
     STAT_UNAVAILABLE_MESSAGE,
     AdminCommandProcessor,
+    AnswerDelivery,
     AuthCommandProcessor,
     ClearCommandProcessor,
     ContinueCommandProcessor,
@@ -167,6 +168,21 @@ def build_router(
     )
 
 
+def build_answer_delivery(
+    sms_provider: FakeSMSProvider | None = None,
+    *,
+    daily_warning_threshold: int = 1000,
+) -> AnswerDelivery:
+    return AnswerDelivery(
+        sms_provider or FakeSMSProvider(),
+        daily_warning_threshold=daily_warning_threshold,
+        timezone=TIMEZONE,
+        clock=lambda: datetime(
+            2026, 8, 21, 12, 0, tzinfo=TIMEZONE
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_ordinary_message_is_sent_to_gigachat() -> None:
     client = FakeChatClient(
@@ -295,7 +311,7 @@ async def test_incoming_sms_processor_uses_selected_model() -> None:
 
     processor = IncomingSMSProcessor(
         router,
-        FakeSMSProvider(),
+        build_answer_delivery(),
         runtime_state,
     )
 
@@ -317,7 +333,7 @@ async def test_incoming_sms_processor_uses_default_model_without_selection() -> 
 
     processor = IncomingSMSProcessor(
         router,
-        FakeSMSProvider(),
+        build_answer_delivery(),
         runtime_state,
     )
 
@@ -638,7 +654,9 @@ async def test_continue_command_processor_sends_answer() -> None:
         chat_client, sms_provider, runtime_state
     )
     processor = ContinueCommandProcessor(
-        router, sms_provider, runtime_state
+        router,
+        build_answer_delivery(sms_provider),
+        runtime_state,
     )
 
     await processor(incoming_sms("+"), "request-19")
@@ -689,3 +707,116 @@ def test_is_clear_command(text: str, expected: bool) -> None:
 )
 def test_is_continue_command(text: str, expected: bool) -> None:
     assert is_continue_command(text) is expected
+
+
+@pytest.mark.asyncio
+async def test_answer_delivery_sends_single_segment_below_threshold() -> None:
+    provider = FakeSMSProvider(
+        history=[
+            make_message(
+                text="ответ",
+                incoming=False,
+                sent_at=datetime(
+                    2026, 8, 21, 9, 0, tzinfo=TIMEZONE
+                ),
+                pdu=2,
+            ),
+        ]
+    )
+    delivery = AnswerDelivery(
+        provider,
+        daily_warning_threshold=5,
+        timezone=TIMEZONE,
+        clock=lambda: datetime(
+            2026, 8, 21, 12, 0, tzinfo=TIMEZONE
+        ),
+    )
+
+    result = await delivery.send_answer(
+        "71111111111", "Короткий ответ."
+    )
+
+    assert provider.sent == [
+        ("71111111111", "Короткий ответ.")
+    ]
+    assert result.pdu_count == 1
+
+
+@pytest.mark.asyncio
+async def test_answer_delivery_adds_warning_at_threshold() -> None:
+    provider = FakeSMSProvider(
+        history=[
+            make_message(
+                text="ответ",
+                incoming=False,
+                sent_at=datetime(
+                    2026, 8, 21, 9, 0, tzinfo=TIMEZONE
+                ),
+                pdu=5,
+            ),
+        ]
+    )
+    delivery = AnswerDelivery(
+        provider,
+        daily_warning_threshold=5,
+        timezone=TIMEZONE,
+        clock=lambda: datetime(
+            2026, 8, 21, 12, 0, tzinfo=TIMEZONE
+        ),
+    )
+
+    await delivery.send_answer(
+        "71111111111", "Короткий ответ."
+    )
+
+    assert provider.sent == [
+        ("71111111111", "[!] Короткий ответ.")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_answer_delivery_fails_open_when_history_unavailable() -> None:
+    provider = FakeSMSProvider(
+        history_error=PlusofonError("history down")
+    )
+    delivery = AnswerDelivery(
+        provider,
+        daily_warning_threshold=5,
+        timezone=TIMEZONE,
+        clock=lambda: datetime(
+            2026, 8, 21, 12, 0, tzinfo=TIMEZONE
+        ),
+    )
+
+    await delivery.send_answer(
+        "71111111111", "Короткий ответ."
+    )
+
+    assert provider.sent == [
+        ("71111111111", "Короткий ответ.")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_answer_delivery_sends_multiple_segments_and_sums_pdu() -> None:
+    provider = FakeSMSProvider()
+    delivery = AnswerDelivery(
+        provider,
+        daily_warning_threshold=1000,
+        timezone=TIMEZONE,
+        clock=lambda: datetime(
+            2026, 8, 21, 12, 0, tzinfo=TIMEZONE
+        ),
+    )
+
+    long_text = " ".join(["word"] * 60)
+
+    result = await delivery.send_answer(
+        "71111111111", long_text
+    )
+
+    assert len(provider.sent) > 1
+    assert result.pdu_count == len(provider.sent)
+    for to, text in provider.sent:
+        assert to == "71111111111"
+        assert text.startswith("[")

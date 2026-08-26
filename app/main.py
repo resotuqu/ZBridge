@@ -18,6 +18,7 @@ from app.core.runtime_state import RuntimeState
 from app.services.gigachat import GigaChatClient
 from app.services.message_router import (
     AdminCommandProcessor,
+    AnswerDelivery,
     AuthCommandProcessor,
     ClearCommandProcessor,
     ContinueCommandProcessor,
@@ -126,9 +127,17 @@ async def lifespan(
             ),
         )
 
+        answer_delivery = AnswerDelivery(
+            plusofon_client,
+            daily_warning_threshold=(
+                settings.daily_warning_threshold
+            ),
+            timezone=settings.timezone_info,
+        )
+
         sms_processor = IncomingSMSProcessor(
             message_router,
-            plusofon_client,
+            answer_delivery,
             application.state.runtime_state,
         )
 
@@ -155,7 +164,7 @@ async def lifespan(
         continue_command_processor = (
             ContinueCommandProcessor(
                 message_router,
-                plusofon_client,
+                answer_delivery,
                 application.state.runtime_state,
             )
         )
@@ -169,6 +178,9 @@ async def lifespan(
         )
         application.state.message_router = (
             message_router
+        )
+        application.state.answer_delivery = (
+            answer_delivery
         )
         application.state.sms_processor = (
             sms_processor
