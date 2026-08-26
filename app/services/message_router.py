@@ -129,7 +129,7 @@ CURRENCY_UNAVAILABLE_MESSAGE = (
 )
 
 NEWS_UNAVAILABLE_MESSAGE = (
-    "Новости сейчас недоступна :("
+    "Новости сейчас недоступны :("
 )
 NEWS_ITEM_LIMIT = 5
 NEWS_SUMMARY_SYSTEM_PROMPT = (

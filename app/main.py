@@ -39,7 +39,6 @@ from app.services.message_router import (
     WikiCommandProcessor,
 )
 from app.services.news import (
-    DEFAULT_RUSSIAN_RSS_FEEDS,
     AggregatedNewsProvider,
     GoogleNewsRssProvider,
     GoogleNewsRssSearchProvider,
@@ -261,10 +260,7 @@ async def lifespan(
 
         russian_news_provider = RussianRssNewsProvider(
             http_client,
-            feeds=(
-                settings.news_rss_feeds
-                or DEFAULT_RUSSIAN_RSS_FEEDS
-            ),
+            feeds=settings.effective_news_rss_feeds,
         )
 
         news_keyword_search_provider = (

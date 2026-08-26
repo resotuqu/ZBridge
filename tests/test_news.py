@@ -1,11 +1,12 @@
 import inspect
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 import respx
 
 from app.services.news import (
+    NEWS_MAX_AGE,
     AggregatedNewsProvider,
     GoogleNewsRssProvider,
     GoogleNewsRssSearchProvider,
@@ -30,6 +31,11 @@ FEEDS = (
     ("РБК", RBC_URL),
     ("ЯСИА", YSIA_URL),
 )
+
+# All fixture pubDates below are "Wed, 25 Mar 2026 ..." -- this is
+# the fixed "now" every test builder injects by default, so
+# freshness filtering never depends on the real wall clock.
+FIXED_NOW = datetime(2026, 3, 25, 12, 0, tzinfo=timezone.utc)
 
 
 def rss2_feed(
@@ -118,31 +124,39 @@ def build_russian_provider(
     http_client: httpx.AsyncClient,
     *,
     feeds: tuple[tuple[str, str], ...] = FEEDS,
+    now: datetime = FIXED_NOW,
 ) -> RussianRssNewsProvider:
     return RussianRssNewsProvider(
         http_client,
         feeds=feeds,
         retry_delays=(0.0, 0.0),
+        clock=lambda: now,
     )
 
 
 def build_google_search_provider(
     http_client: httpx.AsyncClient,
+    *,
+    now: datetime = FIXED_NOW,
 ) -> GoogleNewsRssSearchProvider:
     return GoogleNewsRssSearchProvider(
         http_client,
         url=GOOGLE_SEARCH_URL,
         retry_delays=(0.0, 0.0),
+        clock=lambda: now,
     )
 
 
 def build_google_general_provider(
     http_client: httpx.AsyncClient,
+    *,
+    now: datetime = FIXED_NOW,
 ) -> GoogleNewsRssProvider:
     return GoogleNewsRssProvider(
         http_client,
         url=GOOGLE_GENERAL_URL,
         retry_delays=(0.0, 0.0),
+        clock=lambda: now,
     )
 
 
@@ -310,6 +324,272 @@ async def test_html_and_cdata_are_cleaned_from_snippet() -> (
         "Текст с разметкой & сущностями."
     )
     assert "<" not in items[0].snippet
+
+
+# --- freshness filtering ----------------------------------------------
+
+
+def _feed_with_single_item(
+    *, pub_date: str | None = None
+) -> bytes:
+    item: dict = {
+        "title": "Новость",
+        "link": "https://tass.ru/x",
+        "description": "d",
+    }
+
+    if pub_date is not None:
+        item["pub_date"] = pub_date
+
+    return rss2_feed([item])
+
+
+@pytest.mark.asyncio
+async def test_fresh_item_within_max_age_is_kept() -> (
+    None
+):
+    fresh_at = (
+        FIXED_NOW - NEWS_MAX_AGE + timedelta(hours=1)
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(TASS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=_feed_with_single_item(
+                    pub_date=fresh_at.isoformat()
+                ),
+            )
+        )
+        mock.get(RBC_URL).mock(
+            return_value=httpx.Response(
+                200, content=empty_rss()
+            )
+        )
+        mock.get(YSIA_URL).mock(
+            return_value=httpx.Response(
+                200, content=empty_rss()
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            provider = build_russian_provider(
+                http_client
+            )
+            items = await provider.get_news(None, 10)
+
+    assert len(items) == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_item_older_than_max_age_is_dropped() -> (
+    None
+):
+    stale_at = (
+        FIXED_NOW - NEWS_MAX_AGE - timedelta(hours=1)
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(TASS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=_feed_with_single_item(
+                    pub_date=stale_at.isoformat()
+                ),
+            )
+        )
+        mock.get(RBC_URL).mock(
+            return_value=httpx.Response(
+                200, content=empty_rss()
+            )
+        )
+        mock.get(YSIA_URL).mock(
+            return_value=httpx.Response(
+                200, content=empty_rss()
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            provider = build_russian_provider(
+                http_client
+            )
+
+            with pytest.raises(NewsUnavailableError):
+                await provider.get_news(None, 10)
+
+
+@pytest.mark.asyncio
+async def test_item_without_date_is_dropped() -> None:
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(TASS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=_feed_with_single_item(
+                    pub_date=None
+                ),
+            )
+        )
+        mock.get(RBC_URL).mock(
+            return_value=httpx.Response(
+                200, content=empty_rss()
+            )
+        )
+        mock.get(YSIA_URL).mock(
+            return_value=httpx.Response(
+                200, content=empty_rss()
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            provider = build_russian_provider(
+                http_client
+            )
+
+            with pytest.raises(NewsUnavailableError):
+                await provider.get_news(None, 10)
+
+
+@pytest.mark.asyncio
+async def test_item_with_future_date_is_dropped() -> None:
+    future_at = FIXED_NOW + timedelta(days=1)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(TASS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=_feed_with_single_item(
+                    pub_date=future_at.isoformat()
+                ),
+            )
+        )
+        mock.get(RBC_URL).mock(
+            return_value=httpx.Response(
+                200, content=empty_rss()
+            )
+        )
+        mock.get(YSIA_URL).mock(
+            return_value=httpx.Response(
+                200, content=empty_rss()
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            provider = build_russian_provider(
+                http_client
+            )
+
+            with pytest.raises(NewsUnavailableError):
+                await provider.get_news(None, 10)
+
+
+@pytest.mark.asyncio
+async def test_headline_news_falls_back_to_google_after_stale_russian_items_filtered() -> (
+    None
+):
+    """
+    A Russian feed can return HTTP 200 with real items and still
+    contribute nothing usable, if every one of those items is
+    stale -- that must trigger the same Google fallback as an
+    empty feed.
+    """
+    stale_at = (
+        FIXED_NOW - NEWS_MAX_AGE - timedelta(days=1)
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(TASS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=_feed_with_single_item(
+                    pub_date=stale_at.isoformat()
+                ),
+            )
+        )
+        mock.get(RBC_URL).mock(
+            return_value=httpx.Response(
+                200, content=empty_rss()
+            )
+        )
+        mock.get(YSIA_URL).mock(
+            return_value=httpx.Response(
+                200, content=empty_rss()
+            )
+        )
+        mock.get(GOOGLE_GENERAL_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=rss2_feed(
+                    [
+                        {
+                            "title": "Свежая Google новость",
+                            "link": (
+                                "https://example.com/g"
+                            ),
+                            "description": "d",
+                            "pub_date": (
+                                FIXED_NOW
+                                - timedelta(hours=1)
+                            ).isoformat(),
+                        }
+                    ]
+                ),
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            provider = build_aggregated_provider(
+                http_client
+            )
+            items = await provider.get_news(None, 5)
+
+    assert [item.title for item in items] == [
+        "Свежая Google новость"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_headline_news_unavailable_when_only_stale_data_everywhere() -> (
+    None
+):
+    stale_at = (
+        FIXED_NOW - NEWS_MAX_AGE - timedelta(days=1)
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(TASS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=_feed_with_single_item(
+                    pub_date=stale_at.isoformat()
+                ),
+            )
+        )
+        mock.get(RBC_URL).mock(
+            return_value=httpx.Response(
+                200, content=empty_rss()
+            )
+        )
+        mock.get(YSIA_URL).mock(
+            return_value=httpx.Response(
+                200, content=empty_rss()
+            )
+        )
+        mock.get(GOOGLE_GENERAL_URL).mock(
+            return_value=httpx.Response(
+                200,
+                content=_feed_with_single_item(
+                    pub_date=stale_at.isoformat()
+                ),
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            provider = build_aggregated_provider(
+                http_client
+            )
+
+            with pytest.raises(NewsUnavailableError):
+                await provider.get_news(None, 5)
 
 
 # --- topic handling --------------------------------------------------------
@@ -878,13 +1158,21 @@ async def test_all_feeds_empty_raises_unavailable() -> (
 
 def build_aggregated_provider(
     http_client: httpx.AsyncClient,
+    *,
+    now: datetime = FIXED_NOW,
 ) -> AggregatedNewsProvider:
-    russian_provider = build_russian_provider(http_client)
+    russian_provider = build_russian_provider(
+        http_client, now=now
+    )
     return AggregatedNewsProvider(
         russian_provider,
         RssKeywordSearchProvider(russian_provider),
-        build_google_search_provider(http_client),
-        build_google_general_provider(http_client),
+        build_google_search_provider(
+            http_client, now=now
+        ),
+        build_google_general_provider(
+            http_client, now=now
+        ),
     )
 
 

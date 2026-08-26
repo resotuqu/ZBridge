@@ -5,14 +5,18 @@ import html
 import logging
 import re
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from dateutil import parser as dateutil_parser
 
+from app.core.config import (
+    DEFAULT_RUSSIAN_RSS_FEEDS as config_default_rss_feeds,
+)
 from app.services.retry import call_with_retries
 
 
@@ -30,6 +34,27 @@ _SAFE_TRANSPORT_ERRORS = (
 # unbounded regardless of how large a feed is.
 _MAX_ENTRIES_PER_FEED = 15
 
+# "Свежие новости" means it, not "whatever a stale feed still
+# happens to be serving": anything older than this, missing a
+# date entirely, or dated in the future is dropped before dedup,
+# sort, limit, or a GigaChat summary ever sees it.
+NEWS_MAX_AGE = timedelta(days=7)
+
+
+def _is_fresh(
+    published_at: datetime | None,
+    *,
+    now: datetime,
+    max_age: timedelta,
+) -> bool:
+    if published_at is None:
+        return False
+
+    if published_at > now:
+        return False
+
+    return now - published_at <= max_age
+
 GOOGLE_NEWS_GENERAL_URL = "https://news.google.com/rss"
 GOOGLE_NEWS_SEARCH_URL = (
     "https://news.google.com/rss/search"
@@ -41,21 +66,12 @@ _GOOGLE_NEWS_PARAMS = {
 }
 
 # Built-in allowlist -- never fetched from SMS input or from links
-# discovered inside RSS content, only ever these fixed, operator-
-# configured HTTPS endpoints (or the validated NEWS_RSS_FEEDS
-# override wired in app/main.py).
-DEFAULT_RUSSIAN_RSS_FEEDS: tuple[tuple[str, str], ...] = (
-    ("ТАСС", "https://tass.ru/rss/v2.xml"),
-    (
-        "РБК",
-        (
-            "https://rssexport.rbc.ru/rbcnews/news/"
-            "30/full.rss"
-        ),
-    ),
-    ("Лента.ру", "https://lenta.ru/rss"),
-    ("ЯСИА", "https://ysia.ru/feed/"),
-)
+# discovered inside RSS content, only ever these fixed, code-level
+# HTTPS endpoints (or the validated NEWS_RSS_FEEDS override wired in
+# app/main.py, which can only add another feed on one of these same
+# hosts or replace one of these URLs by name -- see
+# app/core/config.py for the actual host allowlist enforcement).
+DEFAULT_RUSSIAN_RSS_FEEDS = config_default_rss_feeds
 
 
 class NewsError(RuntimeError):
@@ -392,9 +408,15 @@ class _FeedFetcher:
         http_client: httpx.AsyncClient,
         *,
         retry_delays: tuple[float, ...] = (1.0, 3.0),
+        clock: Callable[[], datetime] | None = None,
+        max_age: timedelta = NEWS_MAX_AGE,
     ) -> None:
         self._http = http_client
         self._retry_delays = retry_delays
+        self._clock = clock or (
+            lambda: datetime.now(timezone.utc)
+        )
+        self._max_age = max_age
 
     async def fetch(
         self,
@@ -450,9 +472,19 @@ class _FeedFetcher:
                 f"{response.status_code}"
             )
 
-        return parse_feed(response.content)[
-            :_MAX_ENTRIES_PER_FEED
+        entries = parse_feed(response.content)
+        now = self._clock()
+        fresh_entries = [
+            entry
+            for entry in entries
+            if _is_fresh(
+                entry.published_at,
+                now=now,
+                max_age=self._max_age,
+            )
         ]
+
+        return fresh_entries[:_MAX_ENTRIES_PER_FEED]
 
     @staticmethod
     def _log_retry(
@@ -492,9 +524,14 @@ class RussianRssNewsProvider:
             tuple[str, str], ...
         ] = DEFAULT_RUSSIAN_RSS_FEEDS,
         retry_delays: tuple[float, ...] = (1.0, 3.0),
+        clock: Callable[[], datetime] | None = None,
+        max_age: timedelta = NEWS_MAX_AGE,
     ) -> None:
         self._fetcher = _FeedFetcher(
-            http_client, retry_delays=retry_delays
+            http_client,
+            retry_delays=retry_delays,
+            clock=clock,
+            max_age=max_age,
         )
         self._feeds = feeds
 
@@ -598,9 +635,14 @@ class GoogleNewsRssProvider:
         *,
         url: str = GOOGLE_NEWS_GENERAL_URL,
         retry_delays: tuple[float, ...] = (1.0, 3.0),
+        clock: Callable[[], datetime] | None = None,
+        max_age: timedelta = NEWS_MAX_AGE,
     ) -> None:
         self._fetcher = _FeedFetcher(
-            http_client, retry_delays=retry_delays
+            http_client,
+            retry_delays=retry_delays,
+            clock=clock,
+            max_age=max_age,
         )
         self._url = url
 
@@ -643,9 +685,14 @@ class GoogleNewsRssSearchProvider:
         *,
         url: str = GOOGLE_NEWS_SEARCH_URL,
         retry_delays: tuple[float, ...] = (1.0, 3.0),
+        clock: Callable[[], datetime] | None = None,
+        max_age: timedelta = NEWS_MAX_AGE,
     ) -> None:
         self._fetcher = _FeedFetcher(
-            http_client, retry_delays=retry_delays
+            http_client,
+            retry_delays=retry_delays,
+            clock=clock,
+            max_age=max_age,
         )
         self._url = url
 
