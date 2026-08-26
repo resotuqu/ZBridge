@@ -11,6 +11,10 @@ from app.services.retry import call_with_retries
 
 logger = logging.getLogger(__name__)
 
+WIKIMEDIA_USER_AGENT = (
+    "ZBridge/0.1 (+https://github.com/resotuqu/ZBridge)"
+)
+
 _SAFE_TRANSPORT_ERRORS = (
     httpx.ConnectError,
     httpx.ConnectTimeout,
@@ -96,7 +100,10 @@ class WikipediaProvider:
     async def _fetch_once(self, url: str) -> str:
         response = await self._http.get(
             url,
-            headers={"Accept": "application/json"},
+            headers={
+                "Accept": "application/json",
+                "User-Agent": WIKIMEDIA_USER_AGENT,
+            },
         )
 
         if response.status_code == 404:
