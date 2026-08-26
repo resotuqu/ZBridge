@@ -32,10 +32,19 @@ from app.services.message_router import (
     LatinCommandProcessor,
     MessageRouter,
     ModelsCommandProcessor,
+    NewsCommandProcessor,
     StatCommandProcessor,
     TranslateCommandProcessor,
     WeatherCommandProcessor,
     WikiCommandProcessor,
+)
+from app.services.news import (
+    DEFAULT_RUSSIAN_RSS_FEEDS,
+    AggregatedNewsProvider,
+    GoogleNewsRssProvider,
+    GoogleNewsRssSearchProvider,
+    RssKeywordSearchProvider,
+    RussianRssNewsProvider,
 )
 from app.services.plusofon import PlusofonClient
 from app.services.weather import OpenMeteoWeatherProvider
@@ -250,6 +259,40 @@ async def lifespan(
             )
         )
 
+        russian_news_provider = RussianRssNewsProvider(
+            http_client,
+            feeds=(
+                settings.news_rss_feeds
+                or DEFAULT_RUSSIAN_RSS_FEEDS
+            ),
+        )
+
+        news_keyword_search_provider = (
+            RssKeywordSearchProvider(russian_news_provider)
+        )
+
+        google_news_search_provider = (
+            GoogleNewsRssSearchProvider(http_client)
+        )
+
+        google_news_provider = GoogleNewsRssProvider(
+            http_client
+        )
+
+        news_provider = AggregatedNewsProvider(
+            russian_news_provider,
+            news_keyword_search_provider,
+            google_news_search_provider,
+            google_news_provider,
+        )
+
+        news_command_processor = NewsCommandProcessor(
+            news_provider,
+            message_router,
+            answer_delivery,
+            application.state.runtime_state,
+        )
+
         application.state.http_client = http_client
         application.state.gigachat_client = (
             gigachat_client
@@ -313,6 +356,10 @@ async def lifespan(
         )
         application.state.currency_command_processor = (
             currency_command_processor
+        )
+        application.state.news_provider = news_provider
+        application.state.news_command_processor = (
+            news_command_processor
         )
 
         _install_handler(
@@ -427,6 +474,14 @@ async def lifespan(
             ),
             processor=currency_command_processor,
         )
+        _install_handler(
+            application,
+            state_attr="news_command_handler",
+            managed_attr=(
+                "managed_news_command_handler"
+            ),
+            processor=news_command_processor,
+        )
 
         logger.info(
             "Application resources started",
@@ -516,6 +571,10 @@ def create_app() -> FastAPI:
     )
     application.state.currency_command_handler = None
     application.state.managed_currency_command_handler = (
+        None
+    )
+    application.state.news_command_handler = None
+    application.state.managed_news_command_handler = (
         None
     )
 

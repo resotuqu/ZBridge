@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from functools import lru_cache
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -16,6 +17,9 @@ from app.core.security import normalize_phone_number, secrets_equal
 
 
 AllowedPhoneNumbers = Annotated[frozenset[str], NoDecode]
+NewsRssFeeds = Annotated[
+    tuple[tuple[str, str], ...] | None, NoDecode
+]
 
 
 class Settings(BaseSettings):
@@ -86,6 +90,8 @@ class Settings(BaseSettings):
         gt=0,
     )
 
+    news_rss_feeds: NewsRssFeeds = None
+
     @field_validator("plusofon_number", mode="before")
     @classmethod
     def normalize_service_number(cls, value: object) -> str:
@@ -118,6 +124,68 @@ class Settings(BaseSettings):
             )
 
         return normalized
+
+    @field_validator("news_rss_feeds", mode="before")
+    @classmethod
+    def parse_news_rss_feeds(
+        cls,
+        value: object,
+    ) -> tuple[tuple[str, str], ...] | None:
+        if value is None:
+            return None
+
+        if isinstance(value, str):
+            items = value.split(",")
+        elif isinstance(value, (list, tuple)):
+            items = list(value)
+        else:
+            raise ValueError(
+                "NEWS_RSS_FEEDS must be a comma-separated "
+                "list of Name=https://url pairs."
+            )
+
+        feeds: list[tuple[str, str]] = []
+
+        for raw_item in items:
+            item = str(raw_item).strip()
+
+            if not item:
+                continue
+
+            if "=" not in item:
+                raise ValueError(
+                    "Invalid NEWS_RSS_FEEDS entry "
+                    "(expected Name=https://url): "
+                    f"{item!r}"
+                )
+
+            name, _, url = item.partition("=")
+            name = name.strip()
+            url = url.strip()
+
+            if not name:
+                raise ValueError(
+                    "NEWS_RSS_FEEDS entry is missing a "
+                    "source name."
+                )
+
+            parsed_url = urlsplit(url)
+
+            if (
+                parsed_url.scheme != "https"
+                or not parsed_url.netloc
+            ):
+                raise ValueError(
+                    "NEWS_RSS_FEEDS entry must use an "
+                    f"https:// URL: {url!r}"
+                )
+
+            feeds.append((name, url))
+
+        if not feeds:
+            return None
+
+        return tuple(feeds)
 
     @field_validator("timezone")
     @classmethod
