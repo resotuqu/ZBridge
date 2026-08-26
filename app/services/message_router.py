@@ -24,6 +24,7 @@ from app.services.plusofon import (
     SendResult,
     SMSMessage,
 )
+from app.services.sms_formatter import format_sms_answer
 
 
 logger = logging.getLogger(__name__)
@@ -396,6 +397,91 @@ class MessageRouter:
         ]
 
 
+class AnswerDelivery:
+    """
+    Formats a raw AI answer into SMS-ready segments
+    (Markdown stripped, GSM-7/UCS-2 aware, split on word
+    boundaries, "[!]"/"[i/N]" prefixes) and sends every
+    segment in order via SMSProvider.
+    """
+
+    def __init__(
+        self,
+        sms_provider: SMSProvider,
+        *,
+        daily_warning_threshold: int,
+        timezone: ZoneInfo,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._sms_provider = sms_provider
+        self._daily_warning_threshold = (
+            daily_warning_threshold
+        )
+        self._timezone = timezone
+        self._clock = clock or (
+            lambda: datetime.now(timezone)
+        )
+
+    async def send_answer(
+        self,
+        phone: str,
+        text: str,
+    ) -> SendResult:
+        add_warning = await self._should_warn(phone)
+        segments = format_sms_answer(
+            text, add_warning=add_warning
+        )
+
+        total_pdu = 0
+        last_result: SendResult | None = None
+
+        for segment in segments:
+            last_result = await self._sms_provider.send(
+                phone, segment
+            )
+            total_pdu += last_result.pdu_count
+
+        assert last_result is not None
+
+        return SendResult(
+            message_id=last_result.message_id,
+            pdu_count=total_pdu,
+        )
+
+    async def _should_warn(self, phone: str) -> bool:
+        if self._daily_warning_threshold <= 0:
+            return True
+
+        today = self._clock().date()
+
+        try:
+            messages = (
+                await self._sms_provider.list_messages(
+                    date_from=today,
+                    date_to=today,
+                    incoming=False,
+                    receiver=phone,
+                )
+            )
+        except PlusofonError as exc:
+            logger.warning(
+                "Daily usage lookup unavailable, "
+                "skipping [!] warning",
+                extra={
+                    "event": "usage_unavailable",
+                    "phone": phone,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return False
+
+        sent_today = sum(
+            entry.pdu or 0 for entry in messages
+        )
+
+        return sent_today >= self._daily_warning_threshold
+
+
 class AuthCommandProcessor:
     def __init__(
         self,
@@ -604,11 +690,11 @@ class ContinueCommandProcessor:
     def __init__(
         self,
         message_router: MessageRouter,
-        sms_provider: SMSProvider,
+        answer_delivery: AnswerDelivery,
         runtime_state: RuntimeState,
     ) -> None:
         self._message_router = message_router
-        self._sms_provider = sms_provider
+        self._answer_delivery = answer_delivery
         self._runtime_state = runtime_state
 
     async def __call__(
@@ -639,9 +725,13 @@ class ContinueCommandProcessor:
             )
 
             try:
-                result = await self._sms_provider.send(
-                    message.sender,
-                    answer,
+                result = (
+                    await self
+                    ._answer_delivery
+                    .send_answer(
+                        message.sender,
+                        answer,
+                    )
                 )
             except PlusofonError as exc:
                 logger.error(
@@ -676,11 +766,11 @@ class IncomingSMSProcessor:
     def __init__(
         self,
         message_router: MessageRouter,
-        sms_provider: SMSProvider,
+        answer_delivery: AnswerDelivery,
         runtime_state: RuntimeState,
     ) -> None:
         self._message_router = message_router
-        self._sms_provider = sms_provider
+        self._answer_delivery = answer_delivery
         self._runtime_state = runtime_state
 
     async def __call__(
@@ -707,9 +797,13 @@ class IncomingSMSProcessor:
             )
 
             try:
-                result = await self._sms_provider.send(
-                    message.sender,
-                    answer,
+                result = (
+                    await self
+                    ._answer_delivery
+                    .send_answer(
+                        message.sender,
+                        answer,
+                    )
                 )
             except PlusofonError as exc:
                 logger.error(
