@@ -345,6 +345,30 @@ def _is_service_message(text: str) -> bool:
     return False
 
 
+def _is_hidden_exchange_command(text: str) -> bool:
+    """
+    Commands whose outgoing reply is dynamic (calc result,
+    translation, wiki summary) and therefore cannot be
+    recognized by matching fixed reply text. The whole
+    exchange -- the command and every outgoing SMS up to
+    the next incoming message -- must be hidden from the
+    GigaChat context regardless of what that reply says.
+    """
+    if is_help_command(text):
+        return True
+
+    if parse_calc_command(text) is not None:
+        return True
+
+    if parse_translate_command(text) is not None:
+        return True
+
+    if parse_wiki_command(text) is not None:
+        return True
+
+    return False
+
+
 def _find_last_exchange(
     conversation: list[SMSMessage],
 ) -> tuple[str, str] | None:
@@ -629,20 +653,42 @@ class MessageRouter:
             )
         )
 
-        filtered = [
-            entry
-            for entry in dialog
-            if entry.text.strip()
-            and (
-                boundary is None
-                or entry.created_at > boundary
-            )
-            and not _is_service_message(
-                entry.text.strip()
-            )
-        ]
+        ordered = sorted(
+            dialog, key=lambda entry: entry.sent_at
+        )
 
-        filtered.sort(key=lambda entry: entry.sent_at)
+        filtered: list[SMSMessage] = []
+        hide_reply = False
+
+        for entry in ordered:
+            text = entry.text.strip()
+
+            if not text:
+                continue
+
+            if (
+                boundary is not None
+                and entry.created_at <= boundary
+            ):
+                continue
+
+            if entry.incoming:
+                if _is_hidden_exchange_command(text):
+                    hide_reply = True
+                    continue
+
+                hide_reply = False
+
+                if _is_service_message(text):
+                    continue
+            else:
+                if hide_reply:
+                    continue
+
+                if _is_service_message(text):
+                    continue
+
+            filtered.append(entry)
 
         if (
             exclude_text is not None

@@ -664,6 +664,64 @@ async def test_continue_answer_uses_last_exchange() -> None:
 
 
 @pytest.mark.asyncio
+async def test_continue_answer_skips_trailing_tool_exchange() -> None:
+    dialog = [
+        make_message(
+            text="Что такое VLAN?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 21, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="VLAN — виртуальная сеть.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 21, 9, 0, 5, tzinfo=UTC),
+        ),
+        make_message(
+            text="calc 2+2",
+            incoming=True,
+            sent_at=datetime(2026, 8, 21, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="4",
+            incoming=False,
+            sent_at=datetime(2026, 8, 21, 9, 1, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="+",
+            incoming=True,
+            sent_at=datetime(2026, 8, 21, 9, 2, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="Продолжение.")
+    router = build_router(client, sms_provider)
+
+    result = await router.continue_answer(
+        "71111111111", "request-continue-skip-tool"
+    )
+
+    assert result == "Продолжение."
+    assert client.messages == [
+        ChatMessage(
+            role=ChatRole.SYSTEM,
+            content=SMS_SYSTEM_PROMPT,
+        ),
+        ChatMessage(
+            role=ChatRole.USER,
+            content="Что такое VLAN?",
+        ),
+        ChatMessage(
+            role=ChatRole.ASSISTANT,
+            content="VLAN — виртуальная сеть.",
+        ),
+        ChatMessage(
+            role=ChatRole.USER,
+            content=CONTINUATION_INSTRUCTION,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_continue_answer_without_exchange_is_unavailable() -> None:
     sms_provider = FakeSMSProvider(dialog=[])
     client = FakeChatClient(result="unused")
@@ -1908,9 +1966,19 @@ async def test_context_excludes_tool_commands_and_their_replies() -> None:
             sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
         ),
         make_message(
+            text="Hello",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 1, tzinfo=UTC),
+        ),
+        make_message(
             text="wiki DHCP",
             incoming=True,
             sent_at=datetime(2026, 8, 20, 9, 2, tzinfo=UTC),
+        ),
+        make_message(
+            text="DHCP — протокол динамической настройки узла.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 2, 1, tzinfo=UTC),
         ),
         make_message(
             text="help",
@@ -1930,7 +1998,9 @@ async def test_context_excludes_tool_commands_and_their_replies() -> None:
     ]
     sms_provider = FakeSMSProvider(dialog=dialog)
     client = FakeChatClient(result="ответ")
-    router = build_router(client, sms_provider)
+    router = build_router(
+        client, sms_provider, max_context_messages=20
+    )
 
     await router.answer(incoming_sms(), "request-tools-1")
 
@@ -1938,10 +2008,189 @@ async def test_context_excludes_tool_commands_and_their_replies() -> None:
         message.content for message in client.messages
     ]
     assert "calc 2+2" not in contents
+    assert "4" not in contents
     assert "translate en Привет" not in contents
+    assert "Hello" not in contents
     assert "wiki DHCP" not in contents
+    assert (
+        "DHCP — протокол динамической настройки узла."
+        not in contents
+    )
     assert "help" not in contents
     assert "Что такое NAT?" in contents
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_calc_reply_even_though_result_is_dynamic() -> None:
+    """
+    The calc reply is a computed number that cannot be
+    matched by any fixed text -- only pairing it with the
+    preceding "calc" command keeps it out of context.
+    """
+    dialog = [
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="NAT — это трансляция адресов.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 5, tzinfo=UTC),
+        ),
+        make_message(
+            text="calc 1250*1.2",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="1500",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 1, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(client, sms_provider)
+
+    await router.answer(incoming_sms(), "request-calc-context")
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    assert "calc 1250*1.2" not in contents
+    assert "1500" not in contents
+    assert "NAT — это трансляция адресов." in contents
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_translate_reply_even_though_translation_is_dynamic() -> None:
+    dialog = [
+        make_message(
+            text="translate Hello, how are you?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="Привет, как дела?",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="NAT — это трансляция адресов.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 5, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(client, sms_provider)
+
+    await router.answer(incoming_sms(), "request-translate-context")
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    assert "translate Hello, how are you?" not in contents
+    assert "Привет, как дела?" not in contents
+    assert "NAT — это трансляция адресов." in contents
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_wiki_reply_even_though_summary_is_dynamic() -> None:
+    dialog = [
+        make_message(
+            text="wiki DHCP",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="DHCP — протокол динамической настройки узла.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="NAT — это трансляция адресов.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 5, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(client, sms_provider)
+
+    await router.answer(incoming_sms(), "request-wiki-context")
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    assert "wiki DHCP" not in contents
+    assert (
+        "DHCP — протокол динамической настройки узла."
+        not in contents
+    )
+    assert "NAT — это трансляция адресов." in contents
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_multi_segment_wiki_reply() -> None:
+    """
+    translate/wiki replies can be split into several
+    outgoing SMS segments by AnswerDelivery -- every
+    segment up to the next incoming message must stay
+    hidden, not just the first one.
+    """
+    dialog = [
+        make_message(
+            text="wiki DHCP",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="[1/2] DHCP — протокол динамической настройки узла сети.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="[2/2] Использует UDP-порты 67 и 68.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 2, tzinfo=UTC),
+        ),
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="NAT — это трансляция адресов.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 5, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(client, sms_provider)
+
+    await router.answer(incoming_sms(), "request-wiki-multi-segment")
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    assert "wiki DHCP" not in contents
+    assert not any(
+        "DHCP" in content for content in contents
+    )
+    assert "NAT — это трансляция адресов." in contents
 
 
 @pytest.mark.asyncio
