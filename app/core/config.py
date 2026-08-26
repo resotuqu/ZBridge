@@ -171,6 +171,13 @@ class Settings(BaseSettings):
     daily_warning_threshold: int = Field(default=5, ge=0)
     max_context_messages: int = Field(default=8, ge=1)
 
+    max_inbound_per_minute: int = Field(
+        default=5, gt=0
+    )
+    max_inbound_per_hour: int = Field(
+        default=60, gt=0
+    )
+
     default_latin_mode: Literal["on", "off"] = "off"
 
     sms_price_rub: Decimal = Field(

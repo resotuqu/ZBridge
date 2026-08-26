@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from functools import partial
 from typing import Generic, TypeVar
 from urllib.parse import urljoin, urlsplit
@@ -110,6 +110,27 @@ class _SMSDialogItem(BaseModel):
     created_datetime: datetime
     msg: str
     incoming: bool | None = None
+
+
+class _SMSDialogResponse(BaseModel):
+    """
+    GET /api/v1/sms/dialog/{number} has its own, simpler
+    contract: an object with a `data` array, no `pdu` on its
+    items, and no pagination -- it must never be treated as a
+    `_Page` (which requires `success` and offers
+    `next_page_url`). `success` is modeled as optional, not
+    required: we check it when the API happens to send it,
+    without inventing a required field the endpoint may not
+    actually return.
+    """
+
+    model_config = ConfigDict(
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+    data: list[_SMSDialogItem]
+    success: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,42 +301,44 @@ class PlusofonClient:
     async def list_messages(
         self,
         *,
-        date_from: date | None = None,
-        date_to: date | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
         incoming: bool | None = None,
         receiver: str | None = None,
         sender: str | None = None,
         limit: int | None = None,
     ) -> list[SMSMessage]:
-        params: dict[str, str] = {}
+        body: dict[str, object] = {}
 
         if date_from is not None:
-            params["date_from"] = date_from.isoformat()
-
-        if date_to is not None:
-            params["date_to"] = date_to.isoformat()
-
-        if incoming is not None:
-            params["incoming"] = (
-                "1" if incoming else "0"
+            body["date_from"] = (
+                self._format_filter_datetime(date_from)
             )
 
+        if date_to is not None:
+            body["date_to"] = (
+                self._format_filter_datetime(date_to)
+            )
+
+        if incoming is not None:
+            body["incoming"] = 1 if incoming else 0
+
         if receiver is not None:
-            params["receiver"] = normalize_phone_number(
+            body["receiver"] = normalize_phone_number(
                 receiver
             )
 
         if sender is not None:
-            params["sender"] = normalize_phone_number(
+            body["sender"] = normalize_phone_number(
                 sender
             )
 
         if limit is not None:
-            params["limit"] = str(limit)
+            body["limit"] = limit
 
         items = await self._paginate(
             f"{self._api_base_url}/sms",
-            params,
+            body,
             _Page[_SMSHistoryItem],
         )
 
@@ -331,19 +354,31 @@ class PlusofonClient:
     ) -> list[SMSMessage]:
         normalized_phone = normalize_phone_number(phone)
 
-        items = await self._paginate(
-            (
-                f"{self._api_base_url}"
-                f"/sms/dialog/{normalized_phone}"
-            ),
-            {},
-            _Page[_SMSDialogItem],
-        )
+        try:
+            payload = await call_with_retries(
+                partial(
+                    self._fetch_dialog, normalized_phone
+                ),
+                retry_exceptions=(
+                    *_SAFE_TRANSPORT_ERRORS,
+                    PlusofonTransientError,
+                ),
+                delays=self._retry_delays,
+                on_retry=self._log_retry,
+            )
+        except _SAFE_TRANSPORT_ERRORS as exc:
+            raise PlusofonTransientError(
+                "Could not connect to Plusofon."
+            ) from exc
+        except httpx.TransportError as exc:
+            raise PlusofonTransientError(
+                "Plusofon dialog request failed."
+            ) from exc
 
         messages = sorted(
             (
                 self._dialog_item_to_message(item)
-                for item in items
+                for item in payload.data
             ),
             key=lambda message: message.sent_at,
         )
@@ -352,6 +387,73 @@ class PlusofonClient:
             return []
 
         return messages[-limit:]
+
+    async def _fetch_dialog(
+        self,
+        phone: str,
+    ) -> _SMSDialogResponse:
+        response = await self._http.get(
+            f"{self._api_base_url}/sms/dialog/{phone}",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self._token}",
+                "Client": str(self._client_id),
+            },
+        )
+
+        if response.status_code in {401, 403}:
+            raise PlusofonAuthError(
+                f"Plusofon rejected credentials: "
+                f"{response.status_code}"
+            )
+
+        if (
+            response.status_code == 429
+            or response.status_code >= 500
+        ):
+            raise PlusofonTransientError(
+                f"Plusofon temporarily unavailable: "
+                f"{response.status_code}"
+            )
+
+        if not 200 <= response.status_code < 300:
+            raise PlusofonError(
+                f"Unexpected Plusofon status: "
+                f"{response.status_code}"
+            )
+
+        try:
+            payload = _SMSDialogResponse.model_validate(
+                response.json()
+            )
+        except (ValueError, ValidationError) as exc:
+            raise PlusofonError(
+                "Invalid Plusofon dialog response."
+            ) from exc
+
+        if payload.success is False:
+            raise PlusofonError(
+                "Plusofon dialog request was rejected."
+            )
+
+        return payload
+
+    def _format_filter_datetime(
+        self,
+        value: datetime,
+    ) -> str:
+        if value.tzinfo is None:
+            raise ValueError(
+                "Plusofon date filters must be "
+                "timezone-aware datetimes."
+            )
+
+        localized = value.astimezone(
+            self._default_timezone
+        )
+
+        return localized.strftime("%Y-%m-%d %H:%M:%S")
 
     def _history_item_to_message(
         self,
@@ -414,12 +516,12 @@ class PlusofonClient:
     async def _paginate(
         self,
         url: str,
-        params: dict[str, str],
+        json_body: dict[str, object],
         page_model: type[_Page[_ItemT]],
     ) -> list[_ItemT]:
         items: list[_ItemT] = []
         next_url: str | None = url
-        next_params: dict[str, str] | None = params
+        next_json: dict[str, object] | None = json_body
         seen_urls: set[str] = set()
 
         for _ in range(_MAX_HISTORY_PAGES):
@@ -438,7 +540,7 @@ class PlusofonClient:
                     partial(
                         self._fetch_page,
                         next_url,
-                        next_params,
+                        next_json,
                         page_model,
                     ),
                     retry_exceptions=(
@@ -466,7 +568,10 @@ class PlusofonClient:
                 page.next_page_url,
                 current_url=next_url,
             )
-            next_params = None
+            # The next_page_url is a self-contained
+            # continuation link -- only the very first
+            # request carries the JSON filter body.
+            next_json = None
 
         raise PlusofonError(
             "Plusofon pagination limit exceeded."
@@ -475,12 +580,17 @@ class PlusofonClient:
     async def _fetch_page(
         self,
         url: str,
-        params: dict[str, str] | None,
+        json_body: dict[str, object] | None,
         page_model: type[_Page[_ItemT]],
     ) -> _Page[_ItemT]:
-        response = await self._http.get(
+        # Plusofon's confirmed GET /api/v1/sms contract takes
+        # its filters as a JSON request body, not query
+        # params -- hence the explicit .request("GET", ...)
+        # rather than .get(...), which can't send a body.
+        response = await self._http.request(
+            "GET",
             url,
-            params=params,
+            json=json_body,
             headers={
                 "Accept": "application/json",
                 "Content-Type": "application/json",

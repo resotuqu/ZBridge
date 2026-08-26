@@ -14,7 +14,10 @@ from app.api.plusofon_webhook import (
 )
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.core.runtime_state import RuntimeState
+from app.core.runtime_state import (
+    InboundRateLimiter,
+    RuntimeState,
+)
 from app.services.gigachat import GigaChatClient
 from app.services.currency import (
     FrankfurterCurrencyProvider,
@@ -157,6 +160,7 @@ async def lifespan(
                 settings.daily_warning_threshold
             ),
             timezone=settings.timezone_info,
+            own_number=settings.plusofon_number,
         )
 
         sms_processor = IncomingSMSProcessor(
@@ -196,6 +200,7 @@ async def lifespan(
             default_model=settings.gigachat_model,
             sms_price_rub=settings.sms_price_rub,
             timezone=settings.timezone_info,
+            own_number=settings.plusofon_number,
         )
 
         continue_command_processor = (
@@ -523,6 +528,16 @@ def create_app() -> FastAPI:
 
     application.state.settings = settings
     application.state.runtime_state = RuntimeState()
+    application.state.inbound_rate_limiter = (
+        InboundRateLimiter(
+            max_per_minute=(
+                settings.max_inbound_per_minute
+            ),
+            max_per_hour=(
+                settings.max_inbound_per_hour
+            ),
+        )
+    )
     application.state.incoming_sms_handler = None
     application.state.managed_incoming_sms_handler = None
     application.state.auth_command_handler = None

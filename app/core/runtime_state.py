@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -9,6 +10,134 @@ from time import monotonic
 from zoneinfo import ZoneInfo
 
 from app.core.security import normalize_phone_number
+
+
+_MINUTE_SECONDS = 60.0
+_HOUR_SECONDS = 3600.0
+
+
+class InboundRateLimiter:
+    """
+    Emergency, in-memory-only anti-abuse limit on inbound SMS per
+    phone number: a sliding-window log of event timestamps, capped
+    per phone by the hour window (older entries are purged as they
+    age out) and capped overall by evicting the least-recently-
+    active phone once max_tracked_numbers is reached -- so memory
+    use stays bounded regardless of how many distinct numbers (real
+    or spoofed) show up. There is no persistence: limits reset on
+    every restart by design, matching the rest of RuntimeState.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_per_minute: int,
+        max_per_hour: int,
+        max_tracked_numbers: int = 10_000,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        if max_per_minute <= 0:
+            raise ValueError(
+                "max_per_minute must be positive."
+            )
+
+        if max_per_hour <= 0:
+            raise ValueError(
+                "max_per_hour must be positive."
+            )
+
+        if max_tracked_numbers <= 0:
+            raise ValueError(
+                "max_tracked_numbers must be positive."
+            )
+
+        self._max_per_minute = max_per_minute
+        self._max_per_hour = max_per_hour
+        self._max_tracked_numbers = max_tracked_numbers
+        self._clock = clock
+        self._events_by_phone: dict[
+            str, deque[float]
+        ] = {}
+        self._lock = asyncio.Lock()
+
+    async def allow(self, phone: str) -> bool:
+        """
+        Returns True and records this event if the phone is
+        still within both windows; returns False (without
+        recording anything) if either window is already at its
+        limit.
+        """
+        normalized = normalize_phone_number(phone)
+
+        async with self._lock:
+            now = self._clock()
+            events = self._events_by_phone.get(
+                normalized
+            )
+
+            if events is not None:
+                self._purge_expired(events, now)
+
+                if not events:
+                    del self._events_by_phone[
+                        normalized
+                    ]
+                    events = None
+
+            hour_count = (
+                len(events) if events is not None else 0
+            )
+            minute_cutoff = now - _MINUTE_SECONDS
+            minute_count = (
+                sum(
+                    1
+                    for event_at in events
+                    if event_at > minute_cutoff
+                )
+                if events is not None
+                else 0
+            )
+
+            if (
+                minute_count >= self._max_per_minute
+                or hour_count >= self._max_per_hour
+            ):
+                return False
+
+            if events is None:
+                if (
+                    len(self._events_by_phone)
+                    >= self._max_tracked_numbers
+                ):
+                    self._evict_least_recently_active()
+
+                events = deque()
+                self._events_by_phone[normalized] = (
+                    events
+                )
+
+            events.append(now)
+
+            return True
+
+    def _purge_expired(
+        self,
+        events: deque[float],
+        now: float,
+    ) -> None:
+        cutoff = now - _HOUR_SECONDS
+
+        while events and events[0] <= cutoff:
+            events.popleft()
+
+    def _evict_least_recently_active(self) -> None:
+        oldest_phone = min(
+            self._events_by_phone,
+            key=lambda tracked_phone: (
+                self._events_by_phone[tracked_phone][-1]
+            ),
+        )
+        self._events_by_phone.pop(oldest_phone, None)
 
 
 class TTLKeyCache:

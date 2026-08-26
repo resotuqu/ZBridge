@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from app.core.runtime_state import RuntimeState
 from app.core.security import (
+    normalize_phone_number,
     parse_auth_command,
     parse_model_command,
 )
@@ -356,6 +357,18 @@ def _format_currency(rate: CurrencyRate) -> str:
     )
 
 
+def _start_of_day(day: date, tz: ZoneInfo) -> datetime:
+    return datetime(
+        day.year, day.month, day.day, 0, 0, 0, tzinfo=tz
+    )
+
+
+def _end_of_day(day: date, tz: ZoneInfo) -> datetime:
+    return datetime(
+        day.year, day.month, day.day, 23, 59, 59, tzinfo=tz
+    )
+
+
 def _format_news_items_for_summary(
     items: list[NewsItem],
 ) -> str:
@@ -581,8 +594,8 @@ class SMSProvider(Protocol):
     async def list_messages(
         self,
         *,
-        date_from: date | None = None,
-        date_to: date | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
         incoming: bool | None = None,
         receiver: str | None = None,
         sender: str | None = None,
@@ -930,6 +943,7 @@ class AnswerDelivery:
         *,
         daily_warning_threshold: int,
         timezone: ZoneInfo,
+        own_number: str,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._sms_provider = sms_provider
@@ -937,6 +951,9 @@ class AnswerDelivery:
             daily_warning_threshold
         )
         self._timezone = timezone
+        self._own_number = normalize_phone_number(
+            own_number
+        )
         self._clock = clock or (
             lambda: datetime.now(timezone)
         )
@@ -964,9 +981,14 @@ class AnswerDelivery:
         try:
             messages = (
                 await self._sms_provider.list_messages(
-                    date_from=today,
-                    date_to=today,
+                    date_from=_start_of_day(
+                        today, self._timezone
+                    ),
+                    date_to=_end_of_day(
+                        today, self._timezone
+                    ),
                     incoming=False,
+                    sender=self._own_number,
                     receiver=phone,
                 )
             )
@@ -1806,6 +1828,7 @@ class StatCommandProcessor:
         default_model: str,
         sms_price_rub: Decimal,
         timezone: ZoneInfo,
+        own_number: str,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._sms_provider = sms_provider
@@ -1813,6 +1836,9 @@ class StatCommandProcessor:
         self._default_model = default_model
         self._sms_price_rub = sms_price_rub
         self._timezone = timezone
+        self._own_number = normalize_phone_number(
+            own_number
+        )
         self._clock = clock or (
             lambda: datetime.now(timezone)
         )
@@ -1864,9 +1890,14 @@ class StatCommandProcessor:
 
         month_messages = (
             await self._sms_provider.list_messages(
-                date_from=month_start,
-                date_to=today,
+                date_from=_start_of_day(
+                    month_start, self._timezone
+                ),
+                date_to=_end_of_day(
+                    today, self._timezone
+                ),
                 incoming=False,
+                sender=self._own_number,
                 receiver=phone,
             )
         )

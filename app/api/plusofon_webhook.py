@@ -19,6 +19,7 @@ from pydantic import (
 
 from app.core.config import Settings
 from app.core.runtime_state import (
+    InboundRateLimiter,
     RuntimeState,
     build_webhook_key,
 )
@@ -75,6 +76,9 @@ async def receive_incoming_sms(
     )
     runtime_state: RuntimeState = (
         request.app.state.runtime_state
+    )
+    inbound_rate_limiter: InboundRateLimiter = (
+        request.app.state.inbound_rate_limiter
     )
 
     expected_token = (
@@ -178,6 +182,22 @@ async def receive_incoming_sms(
             "Duplicate webhook ignored",
             extra={
                 "event": "webhook_duplicate",
+                "request_id": request_id,
+                "phone": message.sender,
+            },
+        )
+
+        return WebhookAcknowledgement()
+
+    is_within_rate_limit = await (
+        inbound_rate_limiter.allow(message.sender)
+    )
+
+    if not is_within_rate_limit:
+        logger.warning(
+            "Inbound rate limit exceeded",
+            extra={
+                "event": "webhook_rate_limited",
                 "request_id": request_id,
                 "phone": message.sender,
             },

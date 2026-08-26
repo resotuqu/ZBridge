@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.core.runtime_state import (
+    InboundRateLimiter,
     TTLKeyCache,
     build_webhook_key,
 )
@@ -1258,3 +1259,224 @@ def _sync_handler(
         received[name].append(args)
 
     return handler
+
+
+# --- inbound rate limiting -------------------------------------------------
+
+
+def test_five_inbound_messages_per_minute_pass_sixth_is_blocked(
+    webhook_app: FastAPI,
+) -> None:
+    received: list[IncomingSMS] = []
+
+    async def handler(
+        message: IncomingSMS, request_id: str
+    ) -> None:
+        received.append(message)
+
+    webhook_app.state.incoming_sms_handler = handler
+    webhook_app.state.inbound_rate_limiter = (
+        InboundRateLimiter(
+            max_per_minute=5, max_per_hour=1000
+        )
+    )
+
+    with TestClient(webhook_app) as client:
+        for index in range(6):
+            payload = valid_payload()
+            payload["content"] = f"Вопрос номер {index}"
+
+            response = client.post(
+                (
+                    "/webhooks/plusofon/"
+                    f"incoming/{WEBHOOK_TOKEN}"
+                ),
+                json=payload,
+            )
+
+            assert response.status_code == 200
+
+    assert len(received) == 5
+
+
+def test_hourly_inbound_limit_blocks_after_it_is_reached(
+    webhook_app: FastAPI,
+) -> None:
+    received: list[IncomingSMS] = []
+
+    async def handler(
+        message: IncomingSMS, request_id: str
+    ) -> None:
+        received.append(message)
+
+    webhook_app.state.incoming_sms_handler = handler
+    webhook_app.state.inbound_rate_limiter = (
+        InboundRateLimiter(
+            max_per_minute=1000, max_per_hour=3
+        )
+    )
+
+    with TestClient(webhook_app) as client:
+        for index in range(4):
+            payload = valid_payload()
+            payload["content"] = f"Вопрос номер {index}"
+
+            response = client.post(
+                (
+                    "/webhooks/plusofon/"
+                    f"incoming/{WEBHOOK_TOKEN}"
+                ),
+                json=payload,
+            )
+
+            assert response.status_code == 200
+
+    assert len(received) == 3
+
+
+def test_duplicate_webhook_does_not_consume_rate_limit_quota(
+    webhook_app: FastAPI,
+) -> None:
+    """
+    A retried/duplicate webhook (same sender, recipient, content,
+    and received-at timestamp) is already dropped by the anti-
+    duplicate cache -- it must never reach, and never spend a
+    unit of, the rate limiter's quota.
+    """
+    received: list[IncomingSMS] = []
+
+    async def handler(
+        message: IncomingSMS, request_id: str
+    ) -> None:
+        received.append(message)
+
+    webhook_app.state.incoming_sms_handler = handler
+    webhook_app.state.inbound_rate_limiter = (
+        InboundRateLimiter(
+            max_per_minute=1, max_per_hour=1000
+        )
+    )
+
+    payload = valid_payload()
+
+    with TestClient(webhook_app) as client:
+        for _ in range(5):
+            response = client.post(
+                (
+                    "/webhooks/plusofon/"
+                    f"incoming/{WEBHOOK_TOKEN}"
+                ),
+                json=payload,
+            )
+
+            assert response.status_code == 200
+
+    # Only the first of the five identical requests was a
+    # genuine, non-duplicate webhook -- and it fit inside a
+    # limit of 1 per minute, so it must have gone through.
+    assert len(received) == 1
+
+
+def test_rate_limited_message_never_reaches_gigachat_plusofon_or_sends_sms(
+    webhook_app: FastAPI,
+) -> None:
+    ai_received: list[IncomingSMS] = []
+    auth_received: list[IncomingSMS] = []
+
+    async def ai_handler(
+        message: IncomingSMS, request_id: str
+    ) -> None:
+        ai_received.append(message)
+
+    async def auth_handler(
+        message: IncomingSMS, request_id: str
+    ) -> None:
+        auth_received.append(message)
+
+    webhook_app.state.incoming_sms_handler = ai_handler
+    webhook_app.state.auth_command_handler = (
+        auth_handler
+    )
+    webhook_app.state.inbound_rate_limiter = (
+        InboundRateLimiter(
+            max_per_minute=1, max_per_hour=1000
+        )
+    )
+
+    with TestClient(webhook_app) as client:
+        first_payload = valid_payload()
+        first_payload["content"] = "Первый вопрос"
+        first_response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=first_payload,
+        )
+        assert first_response.status_code == 200
+
+        # This second, distinct message exceeds the 1/minute
+        # limit and must be silently accepted (HTTP 200) but
+        # never processed: no AI call, no auth handling, no
+        # background task, and (since no handler ever runs)
+        # no outgoing SMS either.
+        second_payload = valid_payload()
+        second_payload["content"] = "Второй вопрос"
+        second_response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=second_payload,
+        )
+        assert second_response.status_code == 200
+
+    assert len(ai_received) == 1
+    assert ai_received[0].content == "Первый вопрос"
+    assert auth_received == []
+
+
+def test_rate_limit_applies_independently_per_phone(
+    webhook_app: FastAPI,
+) -> None:
+    received: list[IncomingSMS] = []
+
+    async def handler(
+        message: IncomingSMS, request_id: str
+    ) -> None:
+        received.append(message)
+
+    webhook_app.state.incoming_sms_handler = handler
+    webhook_app.state.inbound_rate_limiter = (
+        InboundRateLimiter(
+            max_per_minute=1, max_per_hour=1000
+        )
+    )
+    # Only 71111111111 is in ALLOWED_PHONE_NUMBERS; grant the
+    # second number temporary authorization so both requests
+    # reach the same rate-limit check ahead of routing, and any
+    # difference in outcome is attributable only to the limiter.
+    webhook_app.state.runtime_state.authorize_temporarily(
+        "72222222222"
+    )
+
+    with TestClient(webhook_app) as client:
+        payload_a = valid_payload()
+        payload_a["src_number"] = "71111111111"
+        payload_a["content"] = "От первого номера"
+
+        payload_b = valid_payload()
+        payload_b["src_number"] = "72222222222"
+        payload_b["content"] = "От второго номера"
+
+        for payload in (payload_a, payload_b):
+            response = client.post(
+                (
+                    "/webhooks/plusofon/"
+                    f"incoming/{WEBHOOK_TOKEN}"
+                ),
+                json=payload,
+            )
+            assert response.status_code == 200
+
+    assert len(received) == 2
