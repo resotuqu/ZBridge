@@ -354,6 +354,7 @@ def build_answer_delivery(
         sms_provider or FakeSMSProvider(),
         daily_warning_threshold=daily_warning_threshold,
         timezone=TIMEZONE,
+        own_number="70000000000",
         clock=lambda: datetime(
             2026, 8, 21, 12, 0, tzinfo=TIMEZONE
         ),
@@ -905,6 +906,7 @@ async def test_stat_command_processor_builds_expected_text() -> None:
         default_model="GigaChat-3-Ultra",
         sms_price_rub=Decimal("2.00"),
         timezone=TIMEZONE,
+        own_number="70000000000",
         clock=lambda: today,
     )
 
@@ -935,6 +937,7 @@ async def test_stat_command_processor_falls_back_on_history_error() -> None:
         default_model="GigaChat-3-Ultra",
         sms_price_rub=Decimal("2.00"),
         timezone=TIMEZONE,
+        own_number="70000000000",
     )
 
     await processor(incoming_sms("stat"), "request-18")
@@ -1038,6 +1041,7 @@ async def test_answer_delivery_sends_single_segment_below_threshold() -> None:
         provider,
         daily_warning_threshold=5,
         timezone=TIMEZONE,
+        own_number="70000000000",
         clock=lambda: datetime(
             2026, 8, 21, 12, 0, tzinfo=TIMEZONE
         ),
@@ -1071,6 +1075,7 @@ async def test_answer_delivery_adds_warning_at_threshold() -> None:
         provider,
         daily_warning_threshold=5,
         timezone=TIMEZONE,
+        own_number="70000000000",
         clock=lambda: datetime(
             2026, 8, 21, 12, 0, tzinfo=TIMEZONE
         ),
@@ -1094,6 +1099,7 @@ async def test_answer_delivery_fails_open_when_history_unavailable() -> None:
         provider,
         daily_warning_threshold=5,
         timezone=TIMEZONE,
+        own_number="70000000000",
         clock=lambda: datetime(
             2026, 8, 21, 12, 0, tzinfo=TIMEZONE
         ),
@@ -1115,6 +1121,7 @@ async def test_answer_delivery_sends_multiple_segments_and_sums_pdu() -> None:
         provider,
         daily_warning_threshold=1000,
         timezone=TIMEZONE,
+        own_number="70000000000",
         clock=lambda: datetime(
             2026, 8, 21, 12, 0, tzinfo=TIMEZONE
         ),

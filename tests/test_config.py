@@ -10,6 +10,51 @@ def test_news_rss_feeds_defaults_to_none() -> None:
     assert settings.news_rss_feeds is None
 
 
+# --- MAX_INBOUND_PER_MINUTE / MAX_INBOUND_PER_HOUR ------------------------
+
+
+def test_inbound_rate_limit_settings_default() -> None:
+    settings = Settings()
+
+    assert settings.max_inbound_per_minute == 5
+    assert settings.max_inbound_per_hour == 60
+
+
+def test_inbound_rate_limit_settings_accept_positive_overrides() -> (
+    None
+):
+    settings = Settings(
+        max_inbound_per_minute=10,
+        max_inbound_per_hour=200,
+    )
+
+    assert settings.max_inbound_per_minute == 10
+    assert settings.max_inbound_per_hour == 200
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["max_inbound_per_minute", "max_inbound_per_hour"],
+)
+@pytest.mark.parametrize("bad_value", [0, -1, -100])
+def test_inbound_rate_limit_settings_reject_non_positive(
+    field_name: str, bad_value: int
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(**{field_name: bad_value})
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["max_inbound_per_minute", "max_inbound_per_hour"],
+)
+def test_inbound_rate_limit_settings_reject_non_integer(
+    field_name: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(**{field_name: "not-a-number"})
+
+
 def test_news_rss_feeds_parses_valid_pairs() -> None:
     settings = Settings(
         news_rss_feeds=(

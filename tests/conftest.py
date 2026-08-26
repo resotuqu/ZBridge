@@ -17,5 +17,15 @@ _TEST_ENV = {
 }
 
 
-for name, value in _TEST_ENV.items():
-    os.environ[name] = value
+if os.environ.get("PLUSOFON_E2E_READONLY") == "1":
+    # Only for the separate opt-in E2E check
+    # (tests/test_plusofon_history_e2e.py): don't clobber the
+    # operator's real credentials, already exported in the shell
+    # before invoking pytest with this flag set.
+    for name, value in _TEST_ENV.items():
+        os.environ.setdefault(name, value)
+else:
+    # Normal pytest and CI: always use deterministic test-*
+    # values, regardless of whatever happens to already be set
+    # in the environment.
+    os.environ.update(_TEST_ENV)
