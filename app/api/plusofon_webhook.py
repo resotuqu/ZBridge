@@ -41,6 +41,7 @@ from app.services.message_router import (
     parse_calc_command,
     parse_currency_command,
     parse_latin_command,
+    parse_news_command,
     parse_translate_command,
     parse_weather_command,
     parse_wiki_command,
@@ -597,6 +598,35 @@ async def receive_incoming_sms(
                 message,
                 request_id,
                 currency_argument,
+            )
+
+        return WebhookAcknowledgement()
+
+    news_topic = parse_news_command(message.content)
+
+    if news_topic is not None:
+        logger.info(
+            "News command routed",
+            extra={
+                "event": "command_routed",
+                "request_id": request_id,
+                "phone": message.sender,
+                "command": "news",
+            },
+        )
+
+        news_handler = getattr(
+            request.app.state,
+            "news_command_handler",
+            None,
+        )
+
+        if news_handler is not None:
+            background_tasks.add_task(
+                news_handler,
+                message,
+                request_id,
+                news_topic,
             )
 
         return WebhookAcknowledgement()

@@ -34,6 +34,8 @@ from app.services.message_router import (
     MODEL_CHANGE_MESSAGE_TEMPLATE,
     MODEL_NOT_FOUND_MESSAGE,
     MODELS_UNAVAILABLE_MESSAGE,
+    NEWS_SUMMARY_SYSTEM_PROMPT,
+    NEWS_UNAVAILABLE_MESSAGE,
     SMS_SYSTEM_PROMPT,
     STAT_UNAVAILABLE_MESSAGE,
     TRANSLATE_EMPTY_TEXT_MESSAGE,
@@ -55,6 +57,7 @@ from app.services.message_router import (
     LatinCommandProcessor,
     MessageRouter,
     ModelsCommandProcessor,
+    NewsCommandProcessor,
     StatCommandProcessor,
     TranslateCommandProcessor,
     WeatherCommandProcessor,
@@ -67,10 +70,12 @@ from app.services.message_router import (
     parse_calc_command,
     parse_currency_command,
     parse_latin_command,
+    parse_news_command,
     parse_translate_command,
     parse_weather_command,
     parse_wiki_command,
 )
+from app.services.news import NewsError, NewsItem
 from app.services.plusofon import PlusofonError, SendResult, SMSMessage
 from app.services.sms_formatter import format_sms_answer
 from app.services.weather import (
@@ -256,6 +261,31 @@ class FakeCurrencyProvider:
 
         assert self.rate is not None
         return self.rate
+
+
+class FakeNewsProvider:
+    def __init__(
+        self,
+        *,
+        items: list[NewsItem] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.items = items
+        self.error = error
+        self.requested: list[
+            tuple[str | None, int]
+        ] = []
+
+    async def get_news(
+        self, topic: str | None, limit: int
+    ) -> list[NewsItem]:
+        self.requested.append((topic, limit))
+
+        if self.error is not None:
+            raise self.error
+
+        assert self.items is not None
+        return self.items
 
 
 def incoming_sms(content: str = "  Что такое VLAN?  ") -> IncomingSMS:
@@ -2354,6 +2384,237 @@ async def test_currency_command_processor_reports_unavailable_on_error() -> None
     ]
 
 
+# --- news ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("news", ""),
+        ("NEWS", ""),
+        ("news ИИ", "ИИ"),
+        ("news космос", "космос"),
+        ("  news   Якутия  ", "Якутия"),
+        ("newsroom ИИ", None),
+        ("моя news подписка", None),
+    ],
+)
+def test_parse_news_command(
+    text: str, expected: str | None
+) -> None:
+    assert parse_news_command(text) == expected
+
+
+def _news_item(
+    *,
+    title: str = "Заголовок",
+    source: str = "ТАСС",
+    snippet: str = "Описание.",
+) -> NewsItem:
+    return NewsItem(
+        title=title,
+        source=source,
+        url="https://example.com/a",
+        published_at=None,
+        snippet=snippet,
+    )
+
+
+@pytest.mark.asyncio
+async def test_news_command_processor_sends_summary_without_topic() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    news_provider = FakeNewsProvider(
+        items=[_news_item()]
+    )
+    client = FakeChatClient(result="1. Главное событие.")
+    router = build_router(client, provider, runtime_state)
+    delivery = build_answer_delivery(provider)
+    processor = NewsCommandProcessor(
+        news_provider, router, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("news"), "request-news-1", ""
+    )
+
+    assert news_provider.requested == [(None, 5)]
+    assert provider.sent == [
+        ("71111111111", "1. Главное событие.")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_news_command_processor_passes_topic_to_provider() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    news_provider = FakeNewsProvider(
+        items=[_news_item(title="Про космос")]
+    )
+    client = FakeChatClient(result="1. Про космос.")
+    router = build_router(client, provider, runtime_state)
+    delivery = build_answer_delivery(provider)
+    processor = NewsCommandProcessor(
+        news_provider, router, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("news космос"),
+        "request-news-2",
+        "космос",
+    )
+
+    assert news_provider.requested == [("космос", 5)]
+
+
+@pytest.mark.asyncio
+async def test_news_command_processor_sends_only_found_items_to_gigachat() -> None:
+    """
+    GigaChat must receive exactly the NewsItem objects the
+    provider found -- a strict system prompt and a single
+    user turn built only from those items -- never the usual
+    dialog context or SMS_SYSTEM_PROMPT.
+    """
+    provider = FakeSMSProvider(
+        dialog=[
+            make_message(
+                text="Какой-то старый вопрос",
+                incoming=True,
+                sent_at=datetime(
+                    2026, 8, 20, 9, 0, tzinfo=UTC
+                ),
+            ),
+            make_message(
+                text="Какой-то старый ответ",
+                incoming=False,
+                sent_at=datetime(
+                    2026, 8, 20, 9, 0, 5, tzinfo=UTC
+                ),
+            ),
+        ]
+    )
+    runtime_state = RuntimeState()
+    news_provider = FakeNewsProvider(
+        items=[
+            _news_item(
+                title="Заголовок A",
+                source="ТАСС",
+                snippet="Снипет A.",
+            ),
+            _news_item(
+                title="Заголовок B",
+                source="РБК",
+                snippet="Снипет B.",
+            ),
+        ]
+    )
+    client = FakeChatClient(result="1. Сводка.")
+    router = build_router(client, provider, runtime_state)
+    delivery = build_answer_delivery(provider)
+    processor = NewsCommandProcessor(
+        news_provider, router, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("news"), "request-news-3", ""
+    )
+
+    assert client.messages == [
+        ChatMessage(
+            role=ChatRole.SYSTEM,
+            content=NEWS_SUMMARY_SYSTEM_PROMPT,
+        ),
+        ChatMessage(
+            role=ChatRole.USER,
+            content=(
+                "1. [ТАСС] Заголовок A — Снипет A.\n"
+                "2. [РБК] Заголовок B — Снипет B."
+            ),
+        ),
+    ]
+    # The dialog history and the normal SMS system prompt
+    # must never leak into the summary request.
+    joined = " ".join(
+        message.content for message in client.messages
+    )
+    assert "старый вопрос" not in joined
+    assert "старый ответ" not in joined
+    assert SMS_SYSTEM_PROMPT not in joined
+
+
+@pytest.mark.asyncio
+async def test_news_command_processor_reports_unavailable_when_no_items() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    news_provider = FakeNewsProvider(
+        error=NewsError("nothing usable")
+    )
+    client = FakeChatClient(result="unused")
+    router = build_router(client, provider, runtime_state)
+    delivery = build_answer_delivery(provider)
+    processor = NewsCommandProcessor(
+        news_provider, router, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("news"), "request-news-4", ""
+    )
+
+    assert provider.sent == [
+        ("71111111111", NEWS_UNAVAILABLE_MESSAGE)
+    ]
+    assert client.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_news_command_processor_reports_ai_failure_on_gigachat_error() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    news_provider = FakeNewsProvider(
+        items=[_news_item()]
+    )
+    client = FakeChatClient(
+        error=GigaChatTransientError("down")
+    )
+    router = build_router(client, provider, runtime_state)
+    delivery = build_answer_delivery(provider)
+    processor = NewsCommandProcessor(
+        news_provider, router, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("news"), "request-news-5", ""
+    )
+
+    assert provider.sent == [
+        ("71111111111", AI_FAILURE_MESSAGE)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_news_command_processor_uses_selected_model() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    runtime_state.set_selected_model(
+        "71111111111", "GigaChat-2-Pro"
+    )
+    news_provider = FakeNewsProvider(
+        items=[_news_item()]
+    )
+    client = FakeChatClient(result="1. Сводка.")
+    router = build_router(client, provider, runtime_state)
+    delivery = build_answer_delivery(provider)
+    processor = NewsCommandProcessor(
+        news_provider, router, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("news"), "request-news-6", ""
+    )
+
+    assert client.model == "GigaChat-2-Pro"
+
+
 def test_weather_and_currency_processors_never_depend_on_gigachat() -> None:
     """
     Neither weather nor currency data may come from
@@ -2755,6 +3016,82 @@ async def test_context_excludes_weather_and_currency_error_replies() -> None:
     assert WEATHER_NOT_FOUND_MESSAGE not in contents
     assert "currency XXX YYY" not in contents
     assert CURRENCY_UNAVAILABLE_MESSAGE not in contents
+    assert "NAT — это трансляция адресов." in contents
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_news_reply_even_though_summary_is_dynamic() -> None:
+    dialog = [
+        make_message(
+            text="news космос",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="1. Запущен новый спутник.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="NAT — это трансляция адресов.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 5, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(client, sms_provider)
+
+    await router.answer(incoming_sms(), "request-news-context")
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    assert "news космос" not in contents
+    assert "1. Запущен новый спутник." not in contents
+    assert "NAT — это трансляция адресов." in contents
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_bare_news_command_and_error_reply() -> None:
+    dialog = [
+        make_message(
+            text="news",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text=NEWS_UNAVAILABLE_MESSAGE,
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="NAT — это трансляция адресов.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 5, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(client, sms_provider)
+
+    await router.answer(incoming_sms(), "request-news-error-context")
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    assert "news" not in contents
+    assert NEWS_UNAVAILABLE_MESSAGE not in contents
     assert "NAT — это трансляция адресов." in contents
 
 
