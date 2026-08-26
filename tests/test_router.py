@@ -6,13 +6,23 @@ import pytest
 
 from app.core.runtime_state import RuntimeState
 from app.schemas.messages import ChatMessage, ChatRole, IncomingSMS
-from app.services.gigachat import GigaChatTransientError
+from app.services.gigachat import (
+    GigaChatError,
+    GigaChatModel,
+    GigaChatTransientError,
+)
 from app.services.message_router import (
     AI_FAILURE_MESSAGE,
     AUTH_SUCCESS_MESSAGE,
     CLEAR_CONFIRMATION_MESSAGE,
     CONTINUATION_INSTRUCTION,
     CONTINUATION_UNAVAILABLE_MESSAGE,
+    LATIN_INSTRUCTION,
+    LATIN_OFF_MESSAGE,
+    LATIN_ON_MESSAGE,
+    MODEL_CHANGE_MESSAGE_TEMPLATE,
+    MODEL_NOT_FOUND_MESSAGE,
+    MODELS_UNAVAILABLE_MESSAGE,
     SMS_SYSTEM_PROMPT,
     STAT_UNAVAILABLE_MESSAGE,
     AdminCommandProcessor,
@@ -21,11 +31,15 @@ from app.services.message_router import (
     ClearCommandProcessor,
     ContinueCommandProcessor,
     IncomingSMSProcessor,
+    LatinCommandProcessor,
     MessageRouter,
+    ModelsCommandProcessor,
     StatCommandProcessor,
     is_clear_command,
     is_continue_command,
+    is_models_command,
     is_stat_command,
+    parse_latin_command,
 )
 from app.services.plusofon import PlusofonError, SendResult, SMSMessage
 
@@ -39,12 +53,17 @@ class FakeChatClient:
         *,
         result: str | None = None,
         error: Exception | None = None,
+        models: list[GigaChatModel] | None = None,
+        models_error: Exception | None = None,
     ) -> None:
         self.result = result
         self.error = error
         self.messages: list[ChatMessage] | None = None
         self.model: str | None = None
         self.call_count = 0
+        self.models = models or []
+        self.models_error = models_error
+        self.list_models_call_count = 0
 
     async def chat(
         self,
@@ -61,6 +80,16 @@ class FakeChatClient:
 
         assert self.result is not None
         return self.result
+
+    async def list_models(
+        self,
+    ) -> list[GigaChatModel]:
+        self.list_models_call_count += 1
+
+        if self.models_error is not None:
+            raise self.models_error
+
+        return self.models
 
 
 class FakeSMSProvider:
@@ -134,10 +163,11 @@ def make_message(
     text: str,
     incoming: bool,
     sent_at: datetime,
+    created_at: datetime | None = None,
     pdu: int | None = 1,
 ) -> SMSMessage:
     return SMSMessage(
-        created_at=sent_at,
+        created_at=created_at or sent_at,
         sent_at=sent_at,
         sender=(
             "71111111111" if incoming else "70000000000"
@@ -148,6 +178,14 @@ def make_message(
         text=text,
         incoming=incoming,
         pdu=pdu,
+    )
+
+
+def gigachat_model(model_id: str) -> GigaChatModel:
+    return GigaChatModel(
+        id=model_id,
+        object="model",
+        owned_by="provider",
     )
 
 
@@ -268,9 +306,18 @@ async def test_router_uses_model_override_when_given() -> None:
 
 
 @pytest.mark.asyncio
-async def test_admin_command_processor_sends_confirmation() -> None:
+async def test_admin_command_processor_switches_to_valid_model() -> None:
     provider = FakeSMSProvider()
-    processor = AdminCommandProcessor(provider)
+    chat_client = FakeChatClient(
+        models=[
+            gigachat_model("GigaChat-2"),
+            gigachat_model("GigaChat-2-Pro"),
+        ]
+    )
+    runtime_state = RuntimeState()
+    processor = AdminCommandProcessor(
+        provider, chat_client, runtime_state
+    )
 
     await processor(
         incoming_sms(),
@@ -281,6 +328,10 @@ async def test_admin_command_processor_sends_confirmation() -> None:
     assert provider.sent == [
         ("71111111111", "Модель: GigaChat-2-Pro")
     ]
+    assert (
+        runtime_state.get_selected_model("71111111111")
+        == "GigaChat-2-Pro"
+    )
 
 
 @pytest.mark.asyncio
@@ -288,12 +339,75 @@ async def test_admin_command_processor_swallows_send_failure() -> None:
     provider = FakeSMSProvider(
         error=PlusofonError("send failed")
     )
-    processor = AdminCommandProcessor(provider)
+    chat_client = FakeChatClient(
+        models=[gigachat_model("GigaChat-2-Pro")]
+    )
+    runtime_state = RuntimeState()
+    processor = AdminCommandProcessor(
+        provider, chat_client, runtime_state
+    )
 
     await processor(
         incoming_sms(),
         "request-7",
         "GigaChat-2-Pro",
+    )
+
+
+@pytest.mark.asyncio
+async def test_admin_command_processor_rejects_unknown_model_without_state_change() -> None:
+    provider = FakeSMSProvider()
+    chat_client = FakeChatClient(
+        models=[gigachat_model("GigaChat-2")]
+    )
+    runtime_state = RuntimeState()
+
+    processor = AdminCommandProcessor(
+        provider, chat_client, runtime_state
+    )
+
+    await processor(
+        incoming_sms(),
+        "request-6b",
+        "GigaChat-Nonexistent",
+    )
+
+    assert provider.sent == [
+        ("71111111111", MODEL_NOT_FOUND_MESSAGE)
+    ]
+    assert (
+        runtime_state.get_selected_model("71111111111")
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_admin_command_processor_falls_back_when_models_api_unavailable() -> None:
+    provider = FakeSMSProvider()
+    chat_client = FakeChatClient(
+        models_error=GigaChatError("models down")
+    )
+    runtime_state = RuntimeState()
+    runtime_state.set_selected_model(
+        "71111111111", "GigaChat-2"
+    )
+
+    processor = AdminCommandProcessor(
+        provider, chat_client, runtime_state
+    )
+
+    await processor(
+        incoming_sms(),
+        "request-6c",
+        "GigaChat-2-Pro",
+    )
+
+    assert provider.sent == [
+        ("71111111111", MODELS_UNAVAILABLE_MESSAGE)
+    ]
+    assert (
+        runtime_state.get_selected_model("71111111111")
+        == "GigaChat-2"
     )
 
 
@@ -820,3 +934,424 @@ async def test_answer_delivery_sends_multiple_segments_and_sums_pdu() -> None:
     for to, text in provider.sent:
         assert to == "71111111111"
         assert text.startswith("[")
+
+
+@pytest.mark.asyncio
+async def test_answer_includes_latin_instruction_when_enabled() -> None:
+    runtime_state = RuntimeState()
+    runtime_state.set_latin_mode("71111111111", True)
+    client = FakeChatClient(result="ответ")
+    router = build_router(
+        client, runtime_state=runtime_state
+    )
+
+    await router.answer(
+        incoming_sms(), "request-latin-1"
+    )
+
+    system_message = client.messages[0]
+    assert system_message.role == ChatRole.SYSTEM
+    assert LATIN_INSTRUCTION in system_message.content
+
+
+@pytest.mark.asyncio
+async def test_answer_excludes_latin_instruction_when_disabled() -> None:
+    runtime_state = RuntimeState()
+    client = FakeChatClient(result="ответ")
+    router = build_router(
+        client, runtime_state=runtime_state
+    )
+
+    await router.answer(
+        incoming_sms(), "request-latin-2"
+    )
+
+    system_message = client.messages[0]
+    assert (
+        LATIN_INSTRUCTION
+        not in system_message.content
+    )
+    assert system_message.content == SMS_SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_continue_answer_includes_latin_instruction_when_enabled() -> None:
+    dialog = [
+        make_message(
+            text="Что такое VLAN?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 21, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="VLAN — виртуальная сеть.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 21, 9, 0, 5, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    runtime_state = RuntimeState()
+    runtime_state.set_latin_mode("71111111111", True)
+    client = FakeChatClient(result="Продолжение.")
+    router = build_router(
+        client, sms_provider, runtime_state
+    )
+
+    await router.continue_answer(
+        "71111111111", "request-latin-3"
+    )
+
+    system_message = client.messages[0]
+    assert LATIN_INSTRUCTION in system_message.content
+
+
+@pytest.mark.asyncio
+async def test_router_uses_default_latin_enabled_setting() -> None:
+    runtime_state = RuntimeState()
+    client = FakeChatClient(result="ответ")
+    router = MessageRouter(
+        client,
+        FakeSMSProvider(),
+        runtime_state,
+        model="GigaChat-3-Ultra",
+        max_context_messages=8,
+        default_latin_enabled=True,
+    )
+
+    await router.answer(
+        incoming_sms(), "request-latin-4"
+    )
+
+    assert (
+        LATIN_INSTRUCTION in client.messages[0].content
+    )
+
+
+@pytest.mark.asyncio
+async def test_router_default_latin_enabled_overridden_by_explicit_off() -> None:
+    runtime_state = RuntimeState()
+    runtime_state.set_latin_mode("71111111111", False)
+    client = FakeChatClient(result="ответ")
+    router = MessageRouter(
+        client,
+        FakeSMSProvider(),
+        runtime_state,
+        model="GigaChat-3-Ultra",
+        max_context_messages=8,
+        default_latin_enabled=True,
+    )
+
+    await router.answer(
+        incoming_sms(), "request-latin-5"
+    )
+
+    assert (
+        LATIN_INSTRUCTION
+        not in client.messages[0].content
+    )
+
+
+@pytest.mark.asyncio
+async def test_latin_command_processor_sends_on_confirmation() -> None:
+    provider = FakeSMSProvider()
+    processor = LatinCommandProcessor(provider)
+
+    await processor(
+        incoming_sms("latin on"),
+        "request-latin-6",
+        True,
+    )
+
+    assert provider.sent == [
+        ("71111111111", LATIN_ON_MESSAGE)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_latin_command_processor_sends_off_confirmation() -> None:
+    provider = FakeSMSProvider()
+    processor = LatinCommandProcessor(provider)
+
+    await processor(
+        incoming_sms("latin off"),
+        "request-latin-7",
+        False,
+    )
+
+    assert provider.sent == [
+        ("71111111111", LATIN_OFF_MESSAGE)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("latin on", True),
+        ("LATIN ON", True),
+        ("  latin on  ", True),
+        ("latin off", False),
+        ("LATIN OFF", False),
+        ("latin", None),
+        ("latin maybe", None),
+        ("+7999 latin on", None),
+    ],
+)
+def test_parse_latin_command(
+    text: str, expected: bool | None
+) -> None:
+    assert parse_latin_command(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("models", True),
+        ("MODELS", True),
+        ("  models  ", True),
+        ("model", False),
+        ("models list", False),
+    ],
+)
+def test_is_models_command(
+    text: str, expected: bool
+) -> None:
+    assert is_models_command(text) is expected
+
+
+@pytest.mark.asyncio
+async def test_models_command_processor_lists_models_and_current() -> None:
+    provider = FakeSMSProvider()
+    chat_client = FakeChatClient(
+        models=[
+            gigachat_model("GigaChat-2"),
+            gigachat_model("GigaChat-2-Pro"),
+            gigachat_model("Embeddings"),
+        ]
+    )
+    runtime_state = RuntimeState()
+    runtime_state.set_selected_model(
+        "71111111111", "GigaChat-2-Pro"
+    )
+    processor = ModelsCommandProcessor(
+        provider,
+        chat_client,
+        runtime_state,
+        default_model="GigaChat-3-Ultra",
+    )
+
+    await processor(
+        incoming_sms("models"), "request-models-1"
+    )
+
+    assert len(provider.sent) == 1
+    to, text = provider.sent[0]
+    assert to == "71111111111"
+    assert "GigaChat-2" in text
+    assert "GigaChat-2-Pro" in text
+    assert "Embeddings" not in text
+    assert "Текущая: GigaChat-2-Pro" in text
+
+
+@pytest.mark.asyncio
+async def test_models_command_processor_uses_default_model_without_selection() -> None:
+    provider = FakeSMSProvider()
+    chat_client = FakeChatClient(
+        models=[gigachat_model("GigaChat-2")]
+    )
+    runtime_state = RuntimeState()
+    processor = ModelsCommandProcessor(
+        provider,
+        chat_client,
+        runtime_state,
+        default_model="GigaChat-3-Ultra",
+    )
+
+    await processor(
+        incoming_sms("models"), "request-models-2"
+    )
+
+    _, text = provider.sent[0]
+    assert "Текущая: GigaChat-3-Ultra" in text
+
+
+@pytest.mark.asyncio
+async def test_models_command_processor_excludes_embedding_only_response() -> None:
+    provider = FakeSMSProvider()
+    chat_client = FakeChatClient(
+        models=[
+            gigachat_model("Embeddings"),
+            gigachat_model("Embeddings-2"),
+        ]
+    )
+    runtime_state = RuntimeState()
+    processor = ModelsCommandProcessor(
+        provider,
+        chat_client,
+        runtime_state,
+        default_model="GigaChat-3-Ultra",
+    )
+
+    await processor(
+        incoming_sms("models"), "request-models-3"
+    )
+
+    assert provider.sent == [
+        ("71111111111", MODELS_UNAVAILABLE_MESSAGE)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_models_command_processor_falls_back_on_api_error() -> None:
+    provider = FakeSMSProvider()
+    chat_client = FakeChatClient(
+        models_error=GigaChatError("down")
+    )
+    runtime_state = RuntimeState()
+    processor = ModelsCommandProcessor(
+        provider,
+        chat_client,
+        runtime_state,
+        default_model="GigaChat-3-Ultra",
+    )
+
+    await processor(
+        incoming_sms("models"), "request-models-4"
+    )
+
+    assert provider.sent == [
+        ("71111111111", MODELS_UNAVAILABLE_MESSAGE)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_pin_commands_and_their_replies() -> None:
+    dialog = [
+        make_message(
+            text="9999 auth",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text=AUTH_SUCCESS_MESSAGE,
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="8241 model GigaChat-2-Pro",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text=MODEL_CHANGE_MESSAGE_TEMPLATE.format(
+                model="GigaChat-2-Pro"
+            ),
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 2, tzinfo=UTC),
+        ),
+        make_message(
+            text="NAT — это трансляция адресов.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 2, 5, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(client, sms_provider)
+
+    await router.answer(incoming_sms(), "request-pin-1")
+
+    joined = " ".join(
+        message.content for message in client.messages
+    )
+    assert "9999" not in joined
+    assert "8241" not in joined
+    assert "auth" not in joined.lower()
+    assert "NAT" in joined
+
+
+@pytest.mark.asyncio
+async def test_continue_answer_unavailable_immediately_after_clear() -> None:
+    dialog = [
+        make_message(
+            text="Что такое VLAN?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 21, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="VLAN — виртуальная сеть.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 21, 9, 0, 5, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    runtime_state = RuntimeState()
+    runtime_state.set_context_boundary(
+        "71111111111",
+        datetime(2026, 8, 21, 9, 1, 0, tzinfo=UTC),
+    )
+    client = FakeChatClient(result="unused")
+    router = build_router(
+        client, sms_provider, runtime_state
+    )
+
+    result = await router.continue_answer(
+        "71111111111", "request-clear-continue"
+    )
+
+    assert result == CONTINUATION_UNAVAILABLE_MESSAGE
+    assert client.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_clear_boundary_compares_created_at_not_sent_at() -> None:
+    boundary = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
+
+    dialog = [
+        # created before the boundary but delivered
+        # (sent) after it -- must still be excluded.
+        make_message(
+            text="Старый вопрос",
+            incoming=True,
+            created_at=datetime(
+                2026, 8, 20, 11, 0, tzinfo=UTC
+            ),
+            sent_at=datetime(
+                2026, 8, 20, 13, 0, tzinfo=UTC
+            ),
+        ),
+        # created after the boundary but with an
+        # earlier sent_at timestamp -- must be kept.
+        make_message(
+            text="Новый вопрос",
+            incoming=True,
+            created_at=datetime(
+                2026, 8, 20, 12, 30, tzinfo=UTC
+            ),
+            sent_at=datetime(
+                2026, 8, 20, 12, 0, 1, tzinfo=UTC
+            ),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    runtime_state = RuntimeState()
+    runtime_state.set_context_boundary(
+        "71111111111", boundary
+    )
+    client = FakeChatClient(result="ответ")
+    router = build_router(
+        client, sms_provider, runtime_state
+    )
+
+    await router.answer(
+        incoming_sms(), "request-created-at"
+    )
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    assert "Старый вопрос" not in contents
+    assert "Новый вопрос" in contents

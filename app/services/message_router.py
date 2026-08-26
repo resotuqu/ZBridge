@@ -18,7 +18,10 @@ from app.schemas.messages import (
     ChatRole,
     IncomingSMS,
 )
-from app.services.gigachat import GigaChatError
+from app.services.gigachat import (
+    GigaChatError,
+    GigaChatModel,
+)
 from app.services.plusofon import (
     PlusofonError,
     SendResult,
@@ -39,6 +42,10 @@ CONTINUATION_INSTRUCTION = (
     "Не повторяй уже отправленный текст."
 )
 STAT_UNAVAILABLE_MESSAGE = "Статистика недоступна :("
+MODELS_UNAVAILABLE_MESSAGE = "Модели сейчас недоступны :("
+MODEL_NOT_FOUND_MESSAGE = "Модель недоступна."
+LATIN_ON_MESSAGE = "Latin: ON"
+LATIN_OFF_MESSAGE = "Latin: OFF"
 
 SMS_SYSTEM_PROMPT = """Ты отвечаешь пользователю через обычные SMS.
 
@@ -52,21 +59,30 @@ SMS_SYSTEM_PROMPT = """Ты отвечаешь пользователю чере
 - не выдумывай текущие новости, погоду, курсы, цены и расписания;
 - для актуальных данных используй только данные, переданные сервером."""
 
+LATIN_INSTRUCTION = (
+    "Пиши русский текст транслитом латиницей.\n"
+    "Не переводи ответ на английский, если "
+    "пользователь не просил перевод."
+)
+
 _STAT_KEYWORDS = {"stat", "stats", "стат"}
 _CLEAR_KEYWORDS = {"clear", "сброс"}
 _CONTINUE_KEYWORDS = {"+"}
+_MODELS_KEYWORDS = {"models"}
 
 _SERVICE_COMMAND_KEYWORDS = (
     _STAT_KEYWORDS
     | _CLEAR_KEYWORDS
     | _CONTINUE_KEYWORDS
-    | {"models"}
+    | _MODELS_KEYWORDS
 )
 
 _SERVICE_NOTIFICATION_PREFIXES = (
     "Модель: ",
     "SMS: ",
 )
+
+_MODELS_LIST_MARKER = "Текущая: "
 
 
 def is_stat_command(text: str) -> bool:
@@ -81,6 +97,46 @@ def is_continue_command(text: str) -> bool:
     return text.strip() in _CONTINUE_KEYWORDS
 
 
+def is_models_command(text: str) -> bool:
+    return text.strip().lower() in _MODELS_KEYWORDS
+
+
+def parse_latin_command(text: str) -> bool | None:
+    normalized = text.strip().lower()
+
+    if normalized == "latin on":
+        return True
+
+    if normalized == "latin off":
+        return False
+
+    return None
+
+
+def _generation_model_ids(
+    models: list[GigaChatModel],
+) -> list[str]:
+    seen: set[str] = set()
+    ids: list[str] = []
+
+    for model in models:
+        model_id = model.id
+
+        if not model_id.startswith("GigaChat"):
+            continue
+
+        if model_id.startswith("Embeddings"):
+            continue
+
+        if model_id in seen:
+            continue
+
+        seen.add(model_id)
+        ids.append(model_id)
+
+    return ids
+
+
 def _service_notification_texts() -> set[str]:
     return {
         AI_FAILURE_MESSAGE,
@@ -88,6 +144,10 @@ def _service_notification_texts() -> set[str]:
         CLEAR_CONFIRMATION_MESSAGE,
         CONTINUATION_UNAVAILABLE_MESSAGE,
         STAT_UNAVAILABLE_MESSAGE,
+        MODELS_UNAVAILABLE_MESSAGE,
+        MODEL_NOT_FOUND_MESSAGE,
+        LATIN_ON_MESSAGE,
+        LATIN_OFF_MESSAGE,
     }
 
 
@@ -105,10 +165,16 @@ def _is_service_message(text: str) -> bool:
     ):
         return True
 
+    if _MODELS_LIST_MARKER in normalized:
+        return True
+
     if parse_auth_command(normalized) is not None:
         return True
 
     if parse_model_command(normalized) is not None:
+        return True
+
+    if parse_latin_command(normalized) is not None:
         return True
 
     return False
@@ -146,6 +212,10 @@ class ChatClient(Protocol):
         model: str,
     ) -> str: ...
 
+    async def list_models(
+        self,
+    ) -> list[GigaChatModel]: ...
+
 
 class SMSProvider(Protocol):
     async def send(
@@ -181,12 +251,16 @@ class MessageRouter:
         *,
         model: str,
         max_context_messages: int,
+        default_latin_enabled: bool = False,
     ) -> None:
         self._chat_client = chat_client
         self._sms_provider = sms_provider
         self._runtime_state = runtime_state
         self._model = model
         self._max_context_messages = max_context_messages
+        self._default_latin_enabled = (
+            default_latin_enabled
+        )
 
     async def answer(
         self,
@@ -206,7 +280,9 @@ class MessageRouter:
         messages = [
             ChatMessage(
                 role=ChatRole.SYSTEM,
-                content=SMS_SYSTEM_PROMPT,
+                content=self._build_system_prompt(
+                    message.sender
+                ),
             ),
             *self._to_chat_messages(context),
             ChatMessage(
@@ -246,7 +322,9 @@ class MessageRouter:
         messages = [
             ChatMessage(
                 role=ChatRole.SYSTEM,
-                content=SMS_SYSTEM_PROMPT,
+                content=self._build_system_prompt(
+                    phone
+                ),
             ),
             ChatMessage(
                 role=ChatRole.USER,
@@ -268,6 +346,21 @@ class MessageRouter:
             request_id,
             phone,
         )
+
+    def _build_system_prompt(self, phone: str) -> str:
+        latin_enabled = (
+            self._runtime_state.get_latin_mode(
+                phone, self._default_latin_enabled
+            )
+        )
+
+        if latin_enabled:
+            return (
+                f"{SMS_SYSTEM_PROMPT}\n\n"
+                f"{LATIN_INSTRUCTION}"
+            )
+
+        return SMS_SYSTEM_PROMPT
 
     async def _call_chat(
         self,
@@ -360,7 +453,7 @@ class MessageRouter:
             if entry.text.strip()
             and (
                 boundary is None
-                or entry.sent_at > boundary
+                or entry.created_at > boundary
             )
             and not _is_service_message(
                 entry.text.strip()
@@ -395,6 +488,28 @@ class MessageRouter:
             )
             for entry in conversation
         ]
+
+
+async def _send_segments(
+    sms_provider: SMSProvider,
+    phone: str,
+    segments: list[str],
+) -> SendResult:
+    total_pdu = 0
+    last_result: SendResult | None = None
+
+    for segment in segments:
+        last_result = await sms_provider.send(
+            phone, segment
+        )
+        total_pdu += last_result.pdu_count
+
+    assert last_result is not None
+
+    return SendResult(
+        message_id=last_result.message_id,
+        pdu_count=total_pdu,
+    )
 
 
 class AnswerDelivery:
@@ -432,20 +547,8 @@ class AnswerDelivery:
             text, add_warning=add_warning
         )
 
-        total_pdu = 0
-        last_result: SendResult | None = None
-
-        for segment in segments:
-            last_result = await self._sms_provider.send(
-                phone, segment
-            )
-            total_pdu += last_result.pdu_count
-
-        assert last_result is not None
-
-        return SendResult(
-            message_id=last_result.message_id,
-            pdu_count=total_pdu,
+        return await _send_segments(
+            self._sms_provider, phone, segments
         )
 
     async def _should_warn(self, phone: str) -> bool:
@@ -515,6 +618,206 @@ class AdminCommandProcessor:
     def __init__(
         self,
         sms_provider: SMSProvider,
+        chat_client: ChatClient,
+        runtime_state: RuntimeState,
+    ) -> None:
+        self._sms_provider = sms_provider
+        self._chat_client = chat_client
+        self._runtime_state = runtime_state
+
+    async def __call__(
+        self,
+        message: IncomingSMS,
+        request_id: str,
+        model_name: str,
+    ) -> None:
+        try:
+            models = (
+                await self._chat_client.list_models()
+            )
+        except GigaChatError as exc:
+            logger.error(
+                "Models lookup failed",
+                extra={
+                    "event": "gigachat_error",
+                    "request_id": request_id,
+                    "phone": message.sender,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            await self._reply(
+                message,
+                request_id,
+                MODELS_UNAVAILABLE_MESSAGE,
+            )
+            return
+
+        generation_ids = _generation_model_ids(models)
+        canonical = next(
+            (
+                model_id
+                for model_id in generation_ids
+                if model_id == model_name
+            ),
+            None,
+        )
+
+        if canonical is None:
+            logger.warning(
+                "Admin model not found",
+                extra={
+                    "event": "admin_model_not_found",
+                    "request_id": request_id,
+                    "phone": message.sender,
+                },
+            )
+            await self._reply(
+                message,
+                request_id,
+                MODEL_NOT_FOUND_MESSAGE,
+            )
+            return
+
+        self._runtime_state.set_selected_model(
+            message.sender, canonical
+        )
+
+        logger.info(
+            "Model changed by admin command",
+            extra={
+                "event": "admin_model_changed",
+                "request_id": request_id,
+                "phone": message.sender,
+                "model": canonical,
+            },
+        )
+
+        await self._reply(
+            message,
+            request_id,
+            MODEL_CHANGE_MESSAGE_TEMPLATE.format(
+                model=canonical
+            ),
+        )
+
+    async def _reply(
+        self,
+        message: IncomingSMS,
+        request_id: str,
+        text: str,
+    ) -> None:
+        try:
+            await self._sms_provider.send(
+                message.sender, text
+            )
+        except PlusofonError as exc:
+            logger.error(
+                "Admin confirmation SMS failed",
+                extra={
+                    "event": "plusofon_error",
+                    "request_id": request_id,
+                    "phone": message.sender,
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+
+class ModelsCommandProcessor:
+    def __init__(
+        self,
+        sms_provider: SMSProvider,
+        chat_client: ChatClient,
+        runtime_state: RuntimeState,
+        *,
+        default_model: str,
+    ) -> None:
+        self._sms_provider = sms_provider
+        self._chat_client = chat_client
+        self._runtime_state = runtime_state
+        self._default_model = default_model
+
+    async def __call__(
+        self,
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        try:
+            models = (
+                await self._chat_client.list_models()
+            )
+        except GigaChatError as exc:
+            logger.error(
+                "Models lookup failed",
+                extra={
+                    "event": "gigachat_error",
+                    "request_id": request_id,
+                    "phone": message.sender,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            await self._send(
+                message.sender,
+                request_id,
+                MODELS_UNAVAILABLE_MESSAGE,
+            )
+            return
+
+        generation_ids = _generation_model_ids(models)
+
+        if not generation_ids:
+            await self._send(
+                message.sender,
+                request_id,
+                MODELS_UNAVAILABLE_MESSAGE,
+            )
+            return
+
+        current_model = (
+            self._runtime_state.get_selected_model(
+                message.sender
+            )
+            or self._default_model
+        )
+
+        text = "\n".join(
+            [
+                *generation_ids,
+                f"{_MODELS_LIST_MARKER}{current_model}",
+            ]
+        )
+
+        await self._send(message.sender, request_id, text)
+
+    async def _send(
+        self,
+        phone: str,
+        request_id: str,
+        text: str,
+    ) -> None:
+        segments = format_sms_answer(
+            text, add_warning=False
+        )
+
+        try:
+            await _send_segments(
+                self._sms_provider, phone, segments
+            )
+        except PlusofonError as exc:
+            logger.error(
+                "Models confirmation SMS failed",
+                extra={
+                    "event": "plusofon_error",
+                    "request_id": request_id,
+                    "phone": phone,
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+
+class LatinCommandProcessor:
+    def __init__(
+        self,
+        sms_provider: SMSProvider,
     ) -> None:
         self._sms_provider = sms_provider
 
@@ -522,18 +825,21 @@ class AdminCommandProcessor:
         self,
         message: IncomingSMS,
         request_id: str,
-        model: str,
+        enabled: bool,
     ) -> None:
+        text = (
+            LATIN_ON_MESSAGE
+            if enabled
+            else LATIN_OFF_MESSAGE
+        )
+
         try:
             await self._sms_provider.send(
-                message.sender,
-                MODEL_CHANGE_MESSAGE_TEMPLATE.format(
-                    model=model
-                ),
+                message.sender, text
             )
         except PlusofonError as exc:
             logger.error(
-                "Admin confirmation SMS failed",
+                "Latin confirmation SMS failed",
                 extra={
                     "event": "plusofon_error",
                     "request_id": request_id,

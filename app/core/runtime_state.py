@@ -137,6 +137,10 @@ class RuntimeState:
         str, datetime
     ] = field(default_factory=dict)
 
+    latin_mode_by_phone: dict[str, bool] = field(
+        default_factory=dict
+    )
+
     gigachat_requests_total: int = 0
 
     gigachat_requests_by_model: dict[str, int] = field(
@@ -213,6 +217,25 @@ class RuntimeState:
     ) -> datetime | None:
         return self.clear_context_after_by_phone.get(
             normalize_phone_number(phone)
+        )
+
+    def set_latin_mode(
+        self,
+        phone: str,
+        enabled: bool,
+    ) -> None:
+        self.latin_mode_by_phone[
+            normalize_phone_number(phone)
+        ] = enabled
+
+    def get_latin_mode(
+        self,
+        phone: str,
+        default: bool,
+    ) -> bool:
+        return self.latin_mode_by_phone.get(
+            normalize_phone_number(phone),
+            default,
         )
 
     def record_gigachat_request(

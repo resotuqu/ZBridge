@@ -10,6 +10,7 @@ from app.schemas.messages import (
 )
 from app.services.gigachat import (
     GigaChatClient,
+    GigaChatError,
 )
 
 
@@ -26,7 +27,21 @@ CHAT_URL = (
     f"{API_BASE_URL}/chat/completions"
 )
 
+MODELS_URL = f"{API_BASE_URL}/models"
+
 FUTURE_EXPIRATION = 4_102_444_800
+
+
+def oauth_response(
+    token: str = "token-one",
+) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "access_token": token,
+            "expires_at": FUTURE_EXPIRATION,
+        },
+    )
 
 
 def chat_response(
@@ -247,3 +262,144 @@ async def test_transient_chat_error_is_retried() -> None:
 
     assert result == "После повторов."
     assert chat_route.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_list_models_parses_response_and_uses_bearer_token() -> None:
+    with respx.mock(assert_all_called=True) as mock:
+        oauth_route = mock.post(OAUTH_URL).mock(
+            return_value=oauth_response("token-one")
+        )
+
+        models_route = mock.get(MODELS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "GigaChat-2",
+                            "object": "model",
+                            "owned_by": "provider",
+                        },
+                        {
+                            "id": "GigaChat-2-Pro",
+                            "object": "model",
+                            "owned_by": "provider",
+                        },
+                    ],
+                },
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            client = build_client(http_client)
+
+            models = await client.list_models()
+
+    assert [model.id for model in models] == [
+        "GigaChat-2",
+        "GigaChat-2-Pro",
+    ]
+    assert oauth_route.call_count == 1
+    assert models_route.call_count == 1
+
+    request = models_route.calls[0].request
+    assert (
+        request.headers["Authorization"]
+        == "Bearer token-one"
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_models_refreshes_token_after_401() -> None:
+    tokens: Iterator[str] = iter(
+        ("token-one", "token-two")
+    )
+
+    def oauth_handler(
+        _: httpx.Request,
+    ) -> httpx.Response:
+        return oauth_response(next(tokens))
+
+    def models_handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        if (
+            request.headers["Authorization"]
+            == "Bearer token-one"
+        ):
+            return httpx.Response(401)
+
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {
+                        "id": "GigaChat-2-Pro",
+                        "object": "model",
+                        "owned_by": "provider",
+                    },
+                ],
+            },
+        )
+
+    with respx.mock(assert_all_called=True) as mock:
+        oauth_route = mock.post(OAUTH_URL).mock(
+            side_effect=oauth_handler
+        )
+
+        models_route = mock.get(MODELS_URL).mock(
+            side_effect=models_handler
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            client = build_client(http_client)
+
+            models = await client.list_models()
+
+    assert [model.id for model in models] == [
+        "GigaChat-2-Pro"
+    ]
+    assert oauth_route.call_count == 2
+    assert models_route.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_list_models_invalid_schema_raises_error() -> None:
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(OAUTH_URL).mock(
+            return_value=oauth_response()
+        )
+
+        mock.get(MODELS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={"unexpected": "shape"},
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            client = build_client(http_client)
+
+            with pytest.raises(GigaChatError):
+                await client.list_models()
+
+
+@pytest.mark.asyncio
+async def test_list_models_final_error_raises_gigachat_error() -> None:
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(OAUTH_URL).mock(
+            return_value=oauth_response()
+        )
+
+        mock.get(MODELS_URL).mock(
+            return_value=httpx.Response(403)
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            client = build_client(http_client)
+
+            with pytest.raises(GigaChatError):
+                await client.list_models()

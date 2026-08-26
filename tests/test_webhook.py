@@ -377,10 +377,15 @@ def test_authorized_phone_with_correct_master_pin_changes_model(
         == "71111111111"
     )
     assert admin_received[0][2] == "GigaChat-2-Pro"
+    # Model validation (and the resulting
+    # RuntimeState mutation) now happens inside
+    # AdminCommandProcessor in the background, not
+    # synchronously in the webhook handler -- see
+    # tests/test_router.py for that behavior.
     assert (
         webhook_app.state.runtime_state
         .get_selected_model("71111111111")
-        == "GigaChat-2-Pro"
+        is None
     )
 
 
@@ -637,3 +642,229 @@ def test_unauthorized_phone_cannot_use_stat_command(
 
     assert response.status_code == 200
     assert stat_received == []
+
+
+def test_authorized_phone_models_command_routes(
+    webhook_app: FastAPI,
+) -> None:
+    models_received: list[
+        tuple[IncomingSMS, str]
+    ] = []
+    ai_received: list[tuple[IncomingSMS, str]] = []
+
+    async def models_handler(
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        models_received.append(
+            (message, request_id)
+        )
+
+    async def sms_handler(
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        ai_received.append((message, request_id))
+
+    webhook_app.state.models_command_handler = (
+        models_handler
+    )
+    webhook_app.state.incoming_sms_handler = (
+        sms_handler
+    )
+
+    payload = valid_payload()
+    payload["content"] = "models"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert len(models_received) == 1
+    assert (
+        models_received[0][0].sender
+        == "71111111111"
+    )
+    assert ai_received == []
+
+
+def test_authorized_phone_latin_on_routes_and_sets_state(
+    webhook_app: FastAPI,
+) -> None:
+    latin_received: list[
+        tuple[IncomingSMS, str, bool]
+    ] = []
+    ai_received: list[tuple[IncomingSMS, str]] = []
+
+    async def latin_handler(
+        message: IncomingSMS,
+        request_id: str,
+        enabled: bool,
+    ) -> None:
+        latin_received.append(
+            (message, request_id, enabled)
+        )
+
+    async def sms_handler(
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        ai_received.append((message, request_id))
+
+    webhook_app.state.latin_command_handler = (
+        latin_handler
+    )
+    webhook_app.state.incoming_sms_handler = (
+        sms_handler
+    )
+
+    payload = valid_payload()
+    payload["content"] = "latin on"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert len(latin_received) == 1
+    assert latin_received[0][2] is True
+    assert ai_received == []
+    assert (
+        webhook_app.state.runtime_state
+        .get_latin_mode("71111111111", default=False)
+        is True
+    )
+
+
+def test_authorized_phone_latin_off_routes_and_sets_state(
+    webhook_app: FastAPI,
+) -> None:
+    latin_received: list[
+        tuple[IncomingSMS, str, bool]
+    ] = []
+
+    async def latin_handler(
+        message: IncomingSMS,
+        request_id: str,
+        enabled: bool,
+    ) -> None:
+        latin_received.append(
+            (message, request_id, enabled)
+        )
+
+    webhook_app.state.latin_command_handler = (
+        latin_handler
+    )
+    webhook_app.state.runtime_state.set_latin_mode(
+        "71111111111", True
+    )
+
+    payload = valid_payload()
+    payload["content"] = "latin off"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert len(latin_received) == 1
+    assert latin_received[0][2] is False
+    assert (
+        webhook_app.state.runtime_state
+        .get_latin_mode("71111111111", default=True)
+        is False
+    )
+
+
+def test_unauthorized_phone_cannot_use_models_command(
+    webhook_app: FastAPI,
+) -> None:
+    models_received: list[
+        tuple[IncomingSMS, str]
+    ] = []
+
+    async def models_handler(
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        models_received.append(
+            (message, request_id)
+        )
+
+    webhook_app.state.models_command_handler = (
+        models_handler
+    )
+
+    payload = valid_payload()
+    payload["src_number"] = "73333333333"
+    payload["content"] = "models"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert models_received == []
+
+
+def test_unauthorized_phone_cannot_use_latin_command(
+    webhook_app: FastAPI,
+) -> None:
+    latin_received: list[
+        tuple[IncomingSMS, str, bool]
+    ] = []
+
+    async def latin_handler(
+        message: IncomingSMS,
+        request_id: str,
+        enabled: bool,
+    ) -> None:
+        latin_received.append(
+            (message, request_id, enabled)
+        )
+
+    webhook_app.state.latin_command_handler = (
+        latin_handler
+    )
+
+    payload = valid_payload()
+    payload["src_number"] = "73333333333"
+    payload["content"] = "latin on"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert latin_received == []
+    assert (
+        webhook_app.state.runtime_state
+        .get_latin_mode("73333333333", default=False)
+        is False
+    )
