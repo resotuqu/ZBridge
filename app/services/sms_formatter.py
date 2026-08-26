@@ -11,8 +11,6 @@ GSM7_MULTIPART_LIMIT = 153
 UCS2_SINGLE_LIMIT = 70
 UCS2_MULTIPART_LIMIT = 67
 
-_MAX_SEGMENT_COUNT_GUESSES = 6
-
 _GSM7_BASIC_CHARS = frozenset(
     "@£$¥èéùìòÇ\nØø\rÅå"
     "ΔΦΓΛΩΠΨΣΘΞ"
@@ -84,151 +82,24 @@ def _normalize_whitespace(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", text).strip()
 
 
-def _char_cost(char: str, charset: Charset) -> int:
-    if charset == "gsm7":
-        return 2 if char in _GSM7_EXTENDED_CHARS else 1
-
-    return len(char.encode("utf-16-le")) // 2
-
-
-def _hard_split(
-    word: str,
-    budget: int,
-    charset: Charset,
-) -> tuple[str, str]:
-    if budget <= 0:
-        return "", word
-
-    piece: list[str] = []
-    used = 0
-
-    for index, char in enumerate(word):
-        cost = _char_cost(char, charset)
-
-        if used + cost > budget:
-            return "".join(piece), word[index:]
-
-        piece.append(char)
-        used += cost
-
-    return word, ""
-
-
-def _chunk_body(
-    body: str,
-    budget: int,
-    charset: Charset,
-) -> list[str]:
-    if budget <= 0:
-        budget = 1
-
-    chunks: list[str] = []
-    current = ""
-
-    for word in body.split(" "):
-        candidate = (
-            f"{current} {word}" if current else word
-        )
-
-        if segment_length(candidate, charset) <= budget:
-            current = candidate
-            continue
-
-        if current:
-            chunks.append(current)
-            current = ""
-
-        remainder = word
-
-        while segment_length(remainder, charset) > budget:
-            piece, remainder = _hard_split(
-                remainder, budget, charset
-            )
-
-            if not piece:
-                break
-
-            chunks.append(piece)
-
-        current = remainder
-
-    if current:
-        chunks.append(current)
-
-    return chunks or [""]
-
-
 def format_sms_answer(
     text: str,
     *,
     add_warning: bool = False,
-) -> list[str]:
+) -> str:
     """
-    Format a raw AI answer into ready-to-send SMS segments:
-    strips Markdown, normalizes whitespace, picks GSM-7/UCS-2,
-    splits on word boundaries within the segment budget, and
-    adds "[!]" / "[i/N]" prefixes per architecture.md section 23.
+    Format a raw answer into one logical SMS submission.
+
+    Long text is intentionally *not* split into separate API calls here.
+    Plusofon receives the complete text with ``reject_long=False`` and
+    creates a concatenated SMS, which compatible handsets display as one
+    message bubble. The provider's returned ``pdu`` remains the source of
+    truth for billing and daily usage.
     """
     cleaned = _normalize_whitespace(_strip_markdown(text))
 
     if not cleaned:
         cleaned = _normalize_whitespace(text) or "..."
 
-    charset: Charset = (
-        "gsm7"
-        if is_gsm7_compatible(cleaned)
-        else "ucs2"
-    )
-    single_limit, multipart_limit = (
-        (GSM7_SINGLE_LIMIT, GSM7_MULTIPART_LIMIT)
-        if charset == "gsm7"
-        else (UCS2_SINGLE_LIMIT, UCS2_MULTIPART_LIMIT)
-    )
-
     warning_prefix = "[!] " if add_warning else ""
-    single_candidate = warning_prefix + cleaned
-
-    if (
-        segment_length(single_candidate, charset)
-        <= single_limit
-    ):
-        return [single_candidate]
-
-    count = 2
-    chunks: list[str] = []
-
-    for _ in range(_MAX_SEGMENT_COUNT_GUESSES):
-        part_prefix_width = len(f"[{count}/{count}] ")
-        budget = max(
-            multipart_limit - part_prefix_width, 1
-        )
-        chunks = _chunk_body(cleaned, budget, charset)
-
-        if len(chunks) == count:
-            break
-
-        count = max(len(chunks), 1)
-    else:
-        part_prefix_width = len(f"[{count}/{count}] ")
-        budget = max(
-            multipart_limit - part_prefix_width, 1
-        )
-        chunks = _chunk_body(cleaned, budget, charset)
-
-    if len(chunks) <= 1:
-        return [single_candidate]
-
-    total = len(chunks)
-    segments = []
-
-    for index, chunk in enumerate(chunks, start=1):
-        prefix = f"[{index}/{total}] "
-
-        if index == 1 and add_warning:
-            prefix = f"[!] {prefix}"
-
-        segments.append(f"{prefix}{chunk}")
-
-    return [
-        segment for segment in segments if segment.strip()
-    ]
+    return warning_prefix + cleaned

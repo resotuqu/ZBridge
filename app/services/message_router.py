@@ -152,8 +152,10 @@ SMS_SYSTEM_PROMPT = """Ты отвечаешь пользователю чере
 - не повторяй вопрос;
 - не используй Markdown и таблицы;
 - пиши информационно плотно;
-- по умолчанию давай короткий ответ;
-- учитывай, что пользователь может запросить продолжение символом "+";
+- по умолчанию отвечай содержательно: для нетривиального вопроса дай 3–6 коротких предложений, раскрыв суть, важный контекст или причину и вывод;
+- не обрывай полезный ответ только ради одной SMS: сервис поддерживает длинные составные сообщения;
+- простые факты, подтверждения и ответы на команды оставляй короткими;
+- символ "+" означает, что пользователь просит продолжение или дополнительные детали;
 - не выдумывай текущие новости, погоду, курсы, цены и расписания;
 - для актуальных данных используй только данные, переданные сервером."""
 
@@ -448,13 +450,13 @@ def _service_notification_texts() -> set[str]:
     }
 
 
-def _help_reply_segments() -> frozenset[str]:
-    return frozenset(
+def _help_reply_texts() -> frozenset[str]:
+    return frozenset({
         format_sms_answer(HELP_TEXT, add_warning=False)
-    )
+    })
 
 
-_HELP_REPLY_SEGMENTS = _help_reply_segments()
+_HELP_REPLY_TEXTS = _help_reply_texts()
 
 
 def _is_service_message(text: str) -> bool:
@@ -466,7 +468,7 @@ def _is_service_message(text: str) -> bool:
     if normalized in _service_notification_texts():
         return True
 
-    if normalized in _HELP_REPLY_SEGMENTS:
+    if normalized in _HELP_REPLY_TEXTS:
         return True
 
     if normalized.startswith(
@@ -907,34 +909,11 @@ class MessageRouter:
         ]
 
 
-async def _send_segments(
-    sms_provider: SMSProvider,
-    phone: str,
-    segments: list[str],
-) -> SendResult:
-    total_pdu = 0
-    last_result: SendResult | None = None
-
-    for segment in segments:
-        last_result = await sms_provider.send(
-            phone, segment
-        )
-        total_pdu += last_result.pdu_count
-
-    assert last_result is not None
-
-    return SendResult(
-        message_id=last_result.message_id,
-        pdu_count=total_pdu,
-    )
-
-
 class AnswerDelivery:
     """
-    Formats a raw AI answer into SMS-ready segments
-    (Markdown stripped, GSM-7/UCS-2 aware, split on word
-    boundaries, "[!]"/"[i/N]" prefixes) and sends every
-    segment in order via SMSProvider.
+    Formats a raw AI answer into one logical SMS submission.
+    Plusofon turns a long submission into a concatenated SMS;
+    the handset normally renders it as one message bubble.
     """
 
     def __init__(
@@ -964,12 +943,12 @@ class AnswerDelivery:
         text: str,
     ) -> SendResult:
         add_warning = await self._should_warn(phone)
-        segments = format_sms_answer(
+        formatted_text = format_sms_answer(
             text, add_warning=add_warning
         )
 
-        return await _send_segments(
-            self._sms_provider, phone, segments
+        return await self._sms_provider.send(
+            phone, formatted_text
         )
 
     async def _should_warn(self, phone: str) -> bool:
@@ -1220,13 +1199,13 @@ class ModelsCommandProcessor:
         request_id: str,
         text: str,
     ) -> None:
-        segments = format_sms_answer(
+        formatted_text = format_sms_answer(
             text, add_warning=False
         )
 
         try:
-            await _send_segments(
-                self._sms_provider, phone, segments
+            await self._sms_provider.send(
+                phone, formatted_text
             )
         except PlusofonError as exc:
             logger.error(
@@ -1294,15 +1273,14 @@ class HelpCommandProcessor:
         )
 
         async with phone_lock:
-            segments = format_sms_answer(
+            formatted_text = format_sms_answer(
                 HELP_TEXT, add_warning=False
             )
 
             try:
-                await _send_segments(
-                    self._sms_provider,
+                await self._sms_provider.send(
                     message.sender,
-                    segments,
+                    formatted_text,
                 )
             except PlusofonError as exc:
                 logger.error(
