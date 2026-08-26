@@ -39,8 +39,10 @@ from app.services.message_router import (
     is_models_command,
     is_stat_command,
     parse_calc_command,
+    parse_currency_command,
     parse_latin_command,
     parse_translate_command,
+    parse_weather_command,
     parse_wiki_command,
 )
 
@@ -533,6 +535,68 @@ async def receive_incoming_sms(
                 message,
                 request_id,
                 wiki_topic,
+            )
+
+        return WebhookAcknowledgement()
+
+    weather_city = parse_weather_command(
+        message.content
+    )
+
+    if weather_city is not None:
+        logger.info(
+            "Weather command routed",
+            extra={
+                "event": "command_routed",
+                "request_id": request_id,
+                "phone": message.sender,
+                "command": "weather",
+            },
+        )
+
+        weather_handler = getattr(
+            request.app.state,
+            "weather_command_handler",
+            None,
+        )
+
+        if weather_handler is not None:
+            background_tasks.add_task(
+                weather_handler,
+                message,
+                request_id,
+                weather_city,
+            )
+
+        return WebhookAcknowledgement()
+
+    currency_argument = parse_currency_command(
+        message.content
+    )
+
+    if currency_argument is not None:
+        logger.info(
+            "Currency command routed",
+            extra={
+                "event": "command_routed",
+                "request_id": request_id,
+                "phone": message.sender,
+                "command": "currency",
+            },
+        )
+
+        currency_handler = getattr(
+            request.app.state,
+            "currency_command_handler",
+            None,
+        )
+
+        if currency_handler is not None:
+            background_tasks.add_task(
+                currency_handler,
+                message,
+                request_id,
+                currency_argument,
             )
 
         return WebhookAcknowledgement()
