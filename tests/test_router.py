@@ -6,9 +6,12 @@ from app.schemas.messages import ChatMessage, ChatRole, IncomingSMS
 from app.services.gigachat import GigaChatTransientError
 from app.services.message_router import (
     AI_FAILURE_MESSAGE,
+    AUTH_SUCCESS_MESSAGE,
     SMS_SYSTEM_PROMPT,
+    AuthCommandProcessor,
     MessageRouter,
 )
+from app.services.plusofon import PlusofonError, SendResult
 
 
 class FakeChatClient:
@@ -94,3 +97,55 @@ async def test_gigachat_failure_returns_exact_fallback() -> None:
 
     assert result == AI_FAILURE_MESSAGE
     assert result == "ИИ поломался :("
+
+
+class FakeSMSProvider:
+    def __init__(
+        self,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self.error = error
+        self.sent: list[tuple[str, str]] = []
+
+    async def send(
+        self,
+        to: str,
+        text: str,
+    ) -> SendResult:
+        if self.error is not None:
+            raise self.error
+
+        self.sent.append((to, text))
+        return SendResult(
+            message_id="sms-1",
+            pdu_count=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_auth_command_processor_sends_confirmation() -> None:
+    provider = FakeSMSProvider()
+    processor = AuthCommandProcessor(provider)
+
+    await processor(
+        incoming_sms(),
+        "request-3",
+    )
+
+    assert provider.sent == [
+        ("71111111111", AUTH_SUCCESS_MESSAGE)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_auth_command_processor_swallows_send_failure() -> None:
+    provider = FakeSMSProvider(
+        error=PlusofonError("send failed")
+    )
+    processor = AuthCommandProcessor(provider)
+
+    await processor(
+        incoming_sms(),
+        "request-4",
+    )

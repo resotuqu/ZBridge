@@ -223,3 +223,114 @@ def test_valid_webhook_is_processed_once(
         received[0][0].sender
         == "71111111111"
     )
+
+
+def test_unknown_phone_with_correct_auth_pin_is_authorized(
+    webhook_app: FastAPI,
+) -> None:
+    auth_received: list[
+        tuple[IncomingSMS, str]
+    ] = []
+    sms_received: list[
+        tuple[IncomingSMS, str]
+    ] = []
+
+    async def auth_handler(
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        auth_received.append(
+            (message, request_id)
+        )
+
+    async def sms_handler(
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        sms_received.append(
+            (message, request_id)
+        )
+
+    webhook_app.state.auth_command_handler = (
+        auth_handler
+    )
+    webhook_app.state.incoming_sms_handler = (
+        sms_handler
+    )
+
+    auth_payload = valid_payload()
+    auth_payload["src_number"] = "72222222222"
+    auth_payload["content"] = "9999 auth"
+
+    follow_up_payload = valid_payload()
+    follow_up_payload["src_number"] = (
+        "72222222222"
+    )
+
+    with TestClient(webhook_app) as client:
+        auth_response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=auth_payload,
+        )
+
+        follow_up_response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=follow_up_payload,
+        )
+
+    assert auth_response.status_code == 200
+    assert (
+        follow_up_response.status_code == 200
+    )
+    assert len(auth_received) == 1
+    assert (
+        auth_received[0][0].sender
+        == "72222222222"
+    )
+    assert len(sms_received) == 1
+    assert (
+        sms_received[0][0].sender
+        == "72222222222"
+    )
+
+
+def test_unknown_phone_with_wrong_auth_pin_is_ignored(
+    webhook_app: FastAPI,
+) -> None:
+    auth_received: list[
+        tuple[IncomingSMS, str]
+    ] = []
+
+    async def auth_handler(
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        auth_received.append(
+            (message, request_id)
+        )
+
+    webhook_app.state.auth_command_handler = (
+        auth_handler
+    )
+
+    payload = valid_payload()
+    payload["src_number"] = "72222222222"
+    payload["content"] = "0000 auth"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert auth_received == []

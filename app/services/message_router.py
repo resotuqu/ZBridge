@@ -20,6 +20,7 @@ from app.services.plusofon import (
 logger = logging.getLogger(__name__)
 
 AI_FAILURE_MESSAGE = "ИИ поломался :("
+AUTH_SUCCESS_MESSAGE = "Доступ разрешён до перезапуска."
 
 SMS_SYSTEM_PROMPT = """Ты отвечаешь пользователю через обычные SMS.
 
@@ -116,6 +117,35 @@ class MessageRouter:
         )
 
         return answer
+
+
+class AuthCommandProcessor:
+    def __init__(
+        self,
+        sms_provider: SMSProvider,
+    ) -> None:
+        self._sms_provider = sms_provider
+
+    async def __call__(
+        self,
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        try:
+            await self._sms_provider.send(
+                message.sender,
+                AUTH_SUCCESS_MESSAGE,
+            )
+        except PlusofonError as exc:
+            logger.error(
+                "Auth confirmation SMS failed",
+                extra={
+                    "event": "plusofon_error",
+                    "request_id": request_id,
+                    "phone": message.sender,
+                    "error_type": type(exc).__name__,
+                },
+            )
 
 
 class IncomingSMSProcessor:
