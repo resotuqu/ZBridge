@@ -3,6 +3,7 @@ import pytest
 import respx
 
 from app.services.wikipedia import (
+    WIKIMEDIA_USER_AGENT,
     WikipediaError,
     WikipediaNotFoundError,
     WikipediaProvider,
@@ -51,6 +52,9 @@ async def test_get_summary_returns_extract() -> None:
 
     request = route.calls[0].request
     assert request.headers["Accept"] == "application/json"
+    assert (
+        request.headers["User-Agent"] == WIKIMEDIA_USER_AGENT
+    )
 
 
 @pytest.mark.asyncio
@@ -95,6 +99,22 @@ async def test_get_summary_404_raises_not_found() -> None:
 
             with pytest.raises(WikipediaNotFoundError):
                 await provider.get_summary("DHCP")
+
+
+@pytest.mark.asyncio
+async def test_get_summary_403_raises_wikipedia_error() -> None:
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.get(SUMMARY_URL).mock(
+            return_value=httpx.Response(403)
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            provider = build_provider(http_client)
+
+            with pytest.raises(WikipediaError):
+                await provider.get_summary("DHCP")
+
+    assert route.call_count == 1
 
 
 @pytest.mark.asyncio
