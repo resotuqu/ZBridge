@@ -9,6 +9,7 @@ import respx
 from app.services.plusofon import (
     PlusofonClient,
     PlusofonDeliveryUnknownError,
+    PlusofonError,
 )
 
 
@@ -77,7 +78,7 @@ async def test_send_sms_uses_expected_request() -> None:
         "text": "Короткий ответ.",
         "number_id": 123,
         "to": 79991234567,
-        "reject_long": False,
+        "reject_long": True,
         "count_pdu": True,
     }
 
@@ -142,6 +143,7 @@ async def test_list_messages_paginates_and_maps_fields() -> None:
     page_one = httpx.Response(
         200,
         json={
+            "success": True,
             "current_page": 1,
             "data": [
                 {
@@ -166,6 +168,7 @@ async def test_list_messages_paginates_and_maps_fields() -> None:
     page_two = httpx.Response(
         200,
         json={
+            "success": True,
             "current_page": 2,
             "data": [
                 {
@@ -220,6 +223,7 @@ async def test_get_dialog_derives_direction_and_limit() -> None:
     response = httpx.Response(
         200,
         json={
+            "success": True,
             "data": [
                 {
                     "id": 1,
@@ -284,3 +288,148 @@ async def test_get_dialog_derives_direction_and_limit() -> None:
     assert messages[1].text == "спасибо"
     assert messages[1].incoming is True
     assert messages[0].pdu is None
+
+
+@pytest.mark.asyncio
+async def test_history_rejects_success_false() -> None:
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(HISTORY_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "success": False,
+                    "data": [],
+                    "next_page_url": None,
+                },
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            client = build_client(http_client)
+
+            with pytest.raises(PlusofonError):
+                await client.list_messages()
+
+
+@pytest.mark.asyncio
+async def test_history_rejects_external_next_page_url() -> None:
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.get(HISTORY_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": [],
+                    "next_page_url": (
+                        "https://evil.example.test/steal"
+                    ),
+                },
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            client = build_client(http_client)
+
+            with pytest.raises(
+                PlusofonError,
+                match="Unsafe Plusofon pagination URL",
+            ):
+                await client.list_messages()
+
+    assert route.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_history_rejects_pagination_loop() -> None:
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.get(HISTORY_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": [],
+                    "next_page_url": HISTORY_URL,
+                },
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            client = build_client(http_client)
+
+            with pytest.raises(
+                PlusofonError,
+                match="pagination loop",
+            ):
+                await client.list_messages()
+
+    assert route.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_nullable_sent_datetime_uses_created_datetime() -> None:
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(HISTORY_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": [
+                        {
+                            "created_datetime": (
+                                "2026-08-21 09:59:19"
+                            ),
+                            "sent_datetime": None,
+                            "sender": "70000000000",
+                            "receiver": "79991234567",
+                            "msg": "ожидает отправки",
+                            "incoming": 0,
+                            "pdu": "2",
+                        },
+                    ],
+                    "next_page_url": None,
+                },
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            client = build_client(http_client)
+            messages = await client.list_messages()
+
+    assert messages[0].sent_at == messages[0].created_at
+    assert messages[0].incoming is False
+    assert messages[0].pdu == 2
+
+
+@pytest.mark.asyncio
+async def test_dialog_prefers_incoming_field() -> None:
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(DIALOG_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": [
+                        {
+                            "sender": "70000000000",
+                            "receiver": "79991234567",
+                            "sent_datetime": None,
+                            "created_datetime": (
+                                "2026-08-21 09:00:00"
+                            ),
+                            "msg": "входящий флаг",
+                            "incoming": 1,
+                        },
+                    ],
+                },
+            )
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            client = build_client(http_client)
+            messages = await client.get_dialog(
+                "79991234567",
+                1,
+            )
+
+    assert messages[0].incoming is True
+    assert messages[0].sent_at == messages[0].created_at

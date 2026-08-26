@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      APP_ENV: test
+      PLUSOFON_TOKEN: ci-plusofon-token
+      PLUSOFON_CLIENT_ID: "10553"
+      PLUSOFON_NUMBER_ID: "1"
+      PLUSOFON_NUMBER: "70000000000"
+      PLUSOFON_WEBHOOK_TOKEN: ci-webhook-token
+      GIGACHAT_CREDENTIALS: ci-gigachat-credentials
+      ALLOWED_PHONE_NUMBERS: "71111111111"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Compile Python sources
+        run: python -m compileall -q app scripts tests
+
+      - name: Check application import
+        run: python -c "from app.main import app; print(app.title, app.version)"
+
+      - name: Check guarded smoke CLIs
+        run: |
+          python -m scripts.smoke_plusofon --help
+          python -m scripts.smoke_e2e --help
+
+      - name: Run tests
+        run: python -m pytest -q
