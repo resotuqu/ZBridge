@@ -20,15 +20,20 @@ from app.services.message_router import (
     AdminCommandProcessor,
     AnswerDelivery,
     AuthCommandProcessor,
+    CalcCommandProcessor,
     ClearCommandProcessor,
     ContinueCommandProcessor,
+    HelpCommandProcessor,
     IncomingSMSProcessor,
     LatinCommandProcessor,
     MessageRouter,
     ModelsCommandProcessor,
     StatCommandProcessor,
+    TranslateCommandProcessor,
+    WikiCommandProcessor,
 )
 from app.services.plusofon import PlusofonClient
+from app.services.wikipedia import WikipediaProvider
 
 
 logger = logging.getLogger(__name__)
@@ -187,6 +192,34 @@ async def lifespan(
             )
         )
 
+        wikipedia_provider = WikipediaProvider(
+            http_client
+        )
+
+        help_command_processor = HelpCommandProcessor(
+            plusofon_client,
+            application.state.runtime_state,
+        )
+
+        calc_command_processor = CalcCommandProcessor(
+            plusofon_client,
+            application.state.runtime_state,
+        )
+
+        translate_command_processor = (
+            TranslateCommandProcessor(
+                message_router,
+                answer_delivery,
+                application.state.runtime_state,
+            )
+        )
+
+        wiki_command_processor = WikiCommandProcessor(
+            wikipedia_provider,
+            answer_delivery,
+            application.state.runtime_state,
+        )
+
         application.state.http_client = http_client
         application.state.gigachat_client = (
             gigachat_client
@@ -223,6 +256,21 @@ async def lifespan(
         )
         application.state.latin_command_processor = (
             latin_command_processor
+        )
+        application.state.wikipedia_provider = (
+            wikipedia_provider
+        )
+        application.state.help_command_processor = (
+            help_command_processor
+        )
+        application.state.calc_command_processor = (
+            calc_command_processor
+        )
+        application.state.translate_command_processor = (
+            translate_command_processor
+        )
+        application.state.wiki_command_processor = (
+            wiki_command_processor
         )
 
         _install_handler(
@@ -289,6 +337,38 @@ async def lifespan(
             ),
             processor=latin_command_processor,
         )
+        _install_handler(
+            application,
+            state_attr="help_command_handler",
+            managed_attr=(
+                "managed_help_command_handler"
+            ),
+            processor=help_command_processor,
+        )
+        _install_handler(
+            application,
+            state_attr="calc_command_handler",
+            managed_attr=(
+                "managed_calc_command_handler"
+            ),
+            processor=calc_command_processor,
+        )
+        _install_handler(
+            application,
+            state_attr="translate_command_handler",
+            managed_attr=(
+                "managed_translate_command_handler"
+            ),
+            processor=translate_command_processor,
+        )
+        _install_handler(
+            application,
+            state_attr="wiki_command_handler",
+            managed_attr=(
+                "managed_wiki_command_handler"
+            ),
+            processor=wiki_command_processor,
+        )
 
         logger.info(
             "Application resources started",
@@ -354,6 +434,22 @@ def create_app() -> FastAPI:
     )
     application.state.latin_command_handler = None
     application.state.managed_latin_command_handler = (
+        None
+    )
+    application.state.help_command_handler = None
+    application.state.managed_help_command_handler = (
+        None
+    )
+    application.state.calc_command_handler = None
+    application.state.managed_calc_command_handler = (
+        None
+    )
+    application.state.translate_command_handler = None
+    application.state.managed_translate_command_handler = (
+        None
+    )
+    application.state.wiki_command_handler = None
+    application.state.managed_wiki_command_handler = (
         None
     )
 

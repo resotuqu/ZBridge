@@ -868,3 +868,227 @@ def test_unauthorized_phone_cannot_use_latin_command(
         .get_latin_mode("73333333333", default=False)
         is False
     )
+
+
+def test_authorized_phone_help_command_routes(
+    webhook_app: FastAPI,
+) -> None:
+    help_received: list[tuple[IncomingSMS, str]] = []
+    ai_received: list[tuple[IncomingSMS, str]] = []
+
+    async def help_handler(
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        help_received.append((message, request_id))
+
+    async def sms_handler(
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        ai_received.append((message, request_id))
+
+    webhook_app.state.help_command_handler = (
+        help_handler
+    )
+    webhook_app.state.incoming_sms_handler = sms_handler
+
+    payload = valid_payload()
+    payload["content"] = "help"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert len(help_received) == 1
+    assert (
+        help_received[0][0].sender == "71111111111"
+    )
+    assert ai_received == []
+
+
+def test_authorized_phone_calc_command_routes_with_expression(
+    webhook_app: FastAPI,
+) -> None:
+    calc_received: list[
+        tuple[IncomingSMS, str, str]
+    ] = []
+    ai_received: list[tuple[IncomingSMS, str]] = []
+
+    async def calc_handler(
+        message: IncomingSMS,
+        request_id: str,
+        expression: str,
+    ) -> None:
+        calc_received.append(
+            (message, request_id, expression)
+        )
+
+    async def sms_handler(
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        ai_received.append((message, request_id))
+
+    webhook_app.state.calc_command_handler = (
+        calc_handler
+    )
+    webhook_app.state.incoming_sms_handler = sms_handler
+
+    payload = valid_payload()
+    payload["content"] = "calc 1250*1.2"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert len(calc_received) == 1
+    assert calc_received[0][2] == "1250*1.2"
+    assert ai_received == []
+
+
+def test_authorized_phone_translate_command_routes_with_argument(
+    webhook_app: FastAPI,
+) -> None:
+    translate_received: list[
+        tuple[IncomingSMS, str, str]
+    ] = []
+
+    async def translate_handler(
+        message: IncomingSMS,
+        request_id: str,
+        argument: str,
+    ) -> None:
+        translate_received.append(
+            (message, request_id, argument)
+        )
+
+    webhook_app.state.translate_command_handler = (
+        translate_handler
+    )
+
+    payload = valid_payload()
+    payload["content"] = "translate en Привет"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert len(translate_received) == 1
+    assert translate_received[0][2] == "en Привет"
+
+
+def test_authorized_phone_wiki_command_routes_with_topic(
+    webhook_app: FastAPI,
+) -> None:
+    wiki_received: list[
+        tuple[IncomingSMS, str, str]
+    ] = []
+
+    async def wiki_handler(
+        message: IncomingSMS,
+        request_id: str,
+        topic: str,
+    ) -> None:
+        wiki_received.append(
+            (message, request_id, topic)
+        )
+
+    webhook_app.state.wiki_command_handler = (
+        wiki_handler
+    )
+
+    payload = valid_payload()
+    payload["content"] = "wiki DHCP"
+
+    with TestClient(webhook_app) as client:
+        response = client.post(
+            (
+                "/webhooks/plusofon/"
+                f"incoming/{WEBHOOK_TOKEN}"
+            ),
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert len(wiki_received) == 1
+    assert wiki_received[0][2] == "DHCP"
+
+
+def test_unauthorized_phone_cannot_use_new_tool_commands(
+    webhook_app: FastAPI,
+) -> None:
+    received: dict[str, list[object]] = {
+        "help": [],
+        "calc": [],
+        "translate": [],
+        "wiki": [],
+    }
+
+    webhook_app.state.help_command_handler = (
+        _sync_handler(received, "help")
+    )
+    webhook_app.state.calc_command_handler = (
+        _sync_handler(received, "calc")
+    )
+    webhook_app.state.translate_command_handler = (
+        _sync_handler(received, "translate")
+    )
+    webhook_app.state.wiki_command_handler = (
+        _sync_handler(received, "wiki")
+    )
+
+    with TestClient(webhook_app) as client:
+        for content in (
+            "help",
+            "calc 1+1",
+            "translate Hello",
+            "wiki DHCP",
+        ):
+            payload = valid_payload()
+            payload["src_number"] = "73333333333"
+            payload["content"] = content
+
+            response = client.post(
+                (
+                    "/webhooks/plusofon/"
+                    f"incoming/{WEBHOOK_TOKEN}"
+                ),
+                json=payload,
+            )
+
+            assert response.status_code == 200
+
+    assert received == {
+        "help": [],
+        "calc": [],
+        "translate": [],
+        "wiki": [],
+    }
+
+
+def _sync_handler(
+    received: dict[str, list[object]], name: str
+):
+    async def handler(*args: object) -> None:
+        received[name].append(args)
+
+    return handler

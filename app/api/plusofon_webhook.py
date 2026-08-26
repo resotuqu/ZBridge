@@ -35,9 +35,13 @@ from app.schemas.plusofon import (
 from app.services.message_router import (
     is_clear_command,
     is_continue_command,
+    is_help_command,
     is_models_command,
     is_stat_command,
+    parse_calc_command,
     parse_latin_command,
+    parse_translate_command,
+    parse_wiki_command,
 )
 
 
@@ -410,6 +414,125 @@ async def receive_incoming_sms(
                 message,
                 request_id,
                 latin_command,
+            )
+
+        return WebhookAcknowledgement()
+
+    if is_help_command(message.content):
+        logger.info(
+            "Help command routed",
+            extra={
+                "event": "command_routed",
+                "request_id": request_id,
+                "phone": message.sender,
+                "command": "help",
+            },
+        )
+
+        help_handler = getattr(
+            request.app.state,
+            "help_command_handler",
+            None,
+        )
+
+        if help_handler is not None:
+            background_tasks.add_task(
+                help_handler,
+                message,
+                request_id,
+            )
+
+        return WebhookAcknowledgement()
+
+    calc_expression = parse_calc_command(
+        message.content
+    )
+
+    if calc_expression is not None:
+        logger.info(
+            "Calc command routed",
+            extra={
+                "event": "command_routed",
+                "request_id": request_id,
+                "phone": message.sender,
+                "command": "calc",
+            },
+        )
+
+        calc_handler = getattr(
+            request.app.state,
+            "calc_command_handler",
+            None,
+        )
+
+        if calc_handler is not None:
+            background_tasks.add_task(
+                calc_handler,
+                message,
+                request_id,
+                calc_expression,
+            )
+
+        return WebhookAcknowledgement()
+
+    translate_argument = parse_translate_command(
+        message.content
+    )
+
+    if translate_argument is not None:
+        logger.info(
+            "Translate command routed",
+            extra={
+                "event": "command_routed",
+                "request_id": request_id,
+                "phone": message.sender,
+                "command": "translate",
+            },
+        )
+
+        translate_handler = getattr(
+            request.app.state,
+            "translate_command_handler",
+            None,
+        )
+
+        if translate_handler is not None:
+            background_tasks.add_task(
+                translate_handler,
+                message,
+                request_id,
+                translate_argument,
+            )
+
+        return WebhookAcknowledgement()
+
+    wiki_topic = parse_wiki_command(
+        message.content
+    )
+
+    if wiki_topic is not None:
+        logger.info(
+            "Wiki command routed",
+            extra={
+                "event": "command_routed",
+                "request_id": request_id,
+                "phone": message.sender,
+                "command": "wiki",
+            },
+        )
+
+        wiki_handler = getattr(
+            request.app.state,
+            "wiki_command_handler",
+            None,
+        )
+
+        if wiki_handler is not None:
+            background_tasks.add_task(
+                wiki_handler,
+                message,
+                request_id,
+                wiki_topic,
             )
 
         return WebhookAcknowledgement()

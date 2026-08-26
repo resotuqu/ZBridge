@@ -48,6 +48,10 @@ async def ready(
         "continue_command_handler",
         "models_command_handler",
         "latin_command_handler",
+        "help_command_handler",
+        "calc_command_handler",
+        "translate_command_handler",
+        "wiki_command_handler",
     )
 
     missing_resources = [

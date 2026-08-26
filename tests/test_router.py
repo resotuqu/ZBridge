@@ -14,9 +14,13 @@ from app.services.gigachat import (
 from app.services.message_router import (
     AI_FAILURE_MESSAGE,
     AUTH_SUCCESS_MESSAGE,
+    CALC_DIVISION_BY_ZERO_MESSAGE,
+    CALC_EMPTY_EXPRESSION_MESSAGE,
+    CALC_INVALID_EXPRESSION_MESSAGE,
     CLEAR_CONFIRMATION_MESSAGE,
     CONTINUATION_INSTRUCTION,
     CONTINUATION_UNAVAILABLE_MESSAGE,
+    HELP_TEXT,
     LATIN_INSTRUCTION,
     LATIN_OFF_MESSAGE,
     LATIN_ON_MESSAGE,
@@ -25,23 +29,40 @@ from app.services.message_router import (
     MODELS_UNAVAILABLE_MESSAGE,
     SMS_SYSTEM_PROMPT,
     STAT_UNAVAILABLE_MESSAGE,
+    TRANSLATE_EMPTY_TEXT_MESSAGE,
+    WIKI_EMPTY_TOPIC_MESSAGE,
+    WIKI_NOT_FOUND_MESSAGE,
+    WIKI_UNAVAILABLE_MESSAGE,
     AdminCommandProcessor,
     AnswerDelivery,
     AuthCommandProcessor,
+    CalcCommandProcessor,
     ClearCommandProcessor,
     ContinueCommandProcessor,
+    HelpCommandProcessor,
     IncomingSMSProcessor,
     LatinCommandProcessor,
     MessageRouter,
     ModelsCommandProcessor,
     StatCommandProcessor,
+    TranslateCommandProcessor,
+    WikiCommandProcessor,
     is_clear_command,
     is_continue_command,
+    is_help_command,
     is_models_command,
     is_stat_command,
+    parse_calc_command,
     parse_latin_command,
+    parse_translate_command,
+    parse_wiki_command,
 )
 from app.services.plusofon import PlusofonError, SendResult, SMSMessage
+from app.services.sms_formatter import format_sms_answer
+from app.services.wikipedia import (
+    WikipediaError,
+    WikipediaNotFoundError,
+)
 
 
 TIMEZONE = ZoneInfo("Asia/Yakutsk")
@@ -147,6 +168,27 @@ class FakeSMSProvider:
             raise self.history_error
 
         return self.history
+
+
+class FakeWikipediaProvider:
+    def __init__(
+        self,
+        *,
+        summary: str | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.summary = summary
+        self.error = error
+        self.requested_topics: list[str] = []
+
+    async def get_summary(self, topic: str) -> str:
+        self.requested_topics.append(topic)
+
+        if self.error is not None:
+            raise self.error
+
+        assert self.summary is not None
+        return self.summary
 
 
 def incoming_sms(content: str = "  Что такое VLAN?  ") -> IncomingSMS:
@@ -598,6 +640,64 @@ async def test_continue_answer_uses_last_exchange() -> None:
 
     result = await router.continue_answer(
         "71111111111", "request-13"
+    )
+
+    assert result == "Продолжение."
+    assert client.messages == [
+        ChatMessage(
+            role=ChatRole.SYSTEM,
+            content=SMS_SYSTEM_PROMPT,
+        ),
+        ChatMessage(
+            role=ChatRole.USER,
+            content="Что такое VLAN?",
+        ),
+        ChatMessage(
+            role=ChatRole.ASSISTANT,
+            content="VLAN — виртуальная сеть.",
+        ),
+        ChatMessage(
+            role=ChatRole.USER,
+            content=CONTINUATION_INSTRUCTION,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_continue_answer_skips_trailing_tool_exchange() -> None:
+    dialog = [
+        make_message(
+            text="Что такое VLAN?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 21, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="VLAN — виртуальная сеть.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 21, 9, 0, 5, tzinfo=UTC),
+        ),
+        make_message(
+            text="calc 2+2",
+            incoming=True,
+            sent_at=datetime(2026, 8, 21, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="4",
+            incoming=False,
+            sent_at=datetime(2026, 8, 21, 9, 1, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="+",
+            incoming=True,
+            sent_at=datetime(2026, 8, 21, 9, 2, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="Продолжение.")
+    router = build_router(client, sms_provider)
+
+    result = await router.continue_answer(
+        "71111111111", "request-continue-skip-tool"
     )
 
     assert result == "Продолжение."
@@ -1355,3 +1455,775 @@ async def test_clear_boundary_compares_created_at_not_sent_at() -> None:
     ]
     assert "Старый вопрос" not in contents
     assert "Новый вопрос" in contents
+
+
+# --- help ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("help", True),
+        ("HELP", True),
+        ("  help  ", True),
+        ("помощь", True),
+        ("ПОМОЩЬ", True),
+        ("helpme", False),
+        ("help me", False),
+    ],
+)
+def test_is_help_command(
+    text: str, expected: bool
+) -> None:
+    assert is_help_command(text) is expected
+
+
+@pytest.mark.asyncio
+async def test_help_command_processor_sends_full_text() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    processor = HelpCommandProcessor(
+        provider, runtime_state
+    )
+
+    await processor(incoming_sms("help"), "request-help-1")
+
+    expected_segments = format_sms_answer(
+        HELP_TEXT, add_warning=False
+    )
+    assert provider.sent == [
+        ("71111111111", segment)
+        for segment in expected_segments
+    ]
+
+
+# --- calc -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("calc 1+1", "1+1"),
+        ("CALC 1+1", "1+1"),
+        ("  calc   (10+5)*2  ", "(10+5)*2"),
+        ("calc", ""),
+        ("calculate 1+1", None),
+        ("что такое calc", None),
+    ],
+)
+def test_parse_calc_command(
+    text: str, expected: str | None
+) -> None:
+    assert parse_calc_command(text) == expected
+
+
+@pytest.mark.asyncio
+async def test_calc_command_processor_sends_result() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    processor = CalcCommandProcessor(
+        provider, runtime_state
+    )
+
+    await processor(
+        incoming_sms("calc 1250*1.2"),
+        "request-calc-1",
+        "1250*1.2",
+    )
+
+    assert provider.sent == [("71111111111", "1500")]
+
+
+@pytest.mark.asyncio
+async def test_calc_command_processor_reports_empty_expression() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    processor = CalcCommandProcessor(
+        provider, runtime_state
+    )
+
+    await processor(
+        incoming_sms("calc"), "request-calc-2", ""
+    )
+
+    assert provider.sent == [
+        ("71111111111", CALC_EMPTY_EXPRESSION_MESSAGE)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_calc_command_processor_reports_invalid_expression() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    processor = CalcCommandProcessor(
+        provider, runtime_state
+    )
+
+    await processor(
+        incoming_sms("calc abc"),
+        "request-calc-3",
+        "abc",
+    )
+
+    assert provider.sent == [
+        ("71111111111", CALC_INVALID_EXPRESSION_MESSAGE)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_calc_command_processor_reports_division_by_zero() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    processor = CalcCommandProcessor(
+        provider, runtime_state
+    )
+
+    await processor(
+        incoming_sms("calc 10/0"),
+        "request-calc-4",
+        "10/0",
+    )
+
+    assert provider.sent == [
+        ("71111111111", CALC_DIVISION_BY_ZERO_MESSAGE)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_calc_command_processor_serializes_per_phone() -> None:
+    import asyncio
+
+    provider = FakeSMSProvider()
+    order: list[str] = []
+
+    original_send = provider.send
+
+    async def slow_send(to: str, text: str) -> SendResult:
+        if text == "1":
+            await asyncio.sleep(0.02)
+        order.append(text)
+        return await original_send(to, text)
+
+    provider.send = slow_send  # type: ignore[method-assign]
+
+    runtime_state = RuntimeState()
+    processor = CalcCommandProcessor(
+        provider, runtime_state
+    )
+
+    await asyncio.gather(
+        processor(
+            incoming_sms("calc 0+1"),
+            "request-calc-5a",
+            "0+1",
+        ),
+        processor(
+            incoming_sms("calc 1+1"),
+            "request-calc-5b",
+            "1+1",
+        ),
+    )
+
+    # The slower first call must still finish (and send)
+    # before the second call's send happens, because both
+    # share the same per-phone lock.
+    assert order == ["1", "2"]
+
+
+# --- translate --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("translate Hello", "Hello"),
+        ("TRANSLATE Hello", "Hello"),
+        ("translate en Привет", "en Привет"),
+        ("translate", ""),
+        ("translated text", None),
+        ("не translate", None),
+    ],
+)
+def test_parse_translate_command(
+    text: str, expected: str | None
+) -> None:
+    assert parse_translate_command(text) == expected
+
+
+@pytest.mark.asyncio
+async def test_translate_command_processor_uses_explicit_target_language() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    chat_client = FakeChatClient(result="Hello!")
+    router = build_router(
+        chat_client, provider, runtime_state
+    )
+    delivery = build_answer_delivery(provider)
+    processor = TranslateCommandProcessor(
+        router, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("translate en Привет"),
+        "request-translate-1",
+        "en Привет",
+    )
+
+    assert chat_client.messages is not None
+    system_message = chat_client.messages[0]
+    assert system_message.role == ChatRole.SYSTEM
+    assert "en" in system_message.content
+    assert chat_client.messages[1] == ChatMessage(
+        role=ChatRole.USER, content="Привет"
+    )
+    assert provider.sent == [("71111111111", "Hello!")]
+
+
+@pytest.mark.asyncio
+async def test_translate_command_processor_auto_detects_russian_to_english() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    chat_client = FakeChatClient(result="Hello!")
+    router = build_router(
+        chat_client, provider, runtime_state
+    )
+    delivery = build_answer_delivery(provider)
+    processor = TranslateCommandProcessor(
+        router, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("translate Привет, как дела?"),
+        "request-translate-2",
+        "Привет, как дела?",
+    )
+
+    system_message = chat_client.messages[0]
+    assert "en" in system_message.content
+
+
+@pytest.mark.asyncio
+async def test_translate_command_processor_auto_detects_other_to_russian() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    chat_client = FakeChatClient(result="Привет!")
+    router = build_router(
+        chat_client, provider, runtime_state
+    )
+    delivery = build_answer_delivery(provider)
+    processor = TranslateCommandProcessor(
+        router, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("translate Hello, how are you?"),
+        "request-translate-3",
+        "Hello, how are you?",
+    )
+
+    system_message = chat_client.messages[0]
+    assert "ru" in system_message.content
+
+
+@pytest.mark.asyncio
+async def test_translate_command_processor_reports_empty_text() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    chat_client = FakeChatClient(result="unused")
+    router = build_router(
+        chat_client, provider, runtime_state
+    )
+    delivery = build_answer_delivery(provider)
+    processor = TranslateCommandProcessor(
+        router, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("translate"),
+        "request-translate-4",
+        "",
+    )
+
+    assert provider.sent == [
+        ("71111111111", TRANSLATE_EMPTY_TEXT_MESSAGE)
+    ]
+    assert chat_client.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_translate_command_processor_falls_back_on_gigachat_error() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    chat_client = FakeChatClient(
+        error=GigaChatError("down")
+    )
+    router = build_router(
+        chat_client, provider, runtime_state
+    )
+    delivery = build_answer_delivery(provider)
+    processor = TranslateCommandProcessor(
+        router, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("translate Hello"),
+        "request-translate-5",
+        "Hello",
+    )
+
+    assert provider.sent == [
+        ("71111111111", AI_FAILURE_MESSAGE)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_translate_command_processor_uses_selected_model() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    runtime_state.set_selected_model(
+        "71111111111", "GigaChat-2-Pro"
+    )
+    chat_client = FakeChatClient(result="Hello!")
+    router = build_router(
+        chat_client, provider, runtime_state
+    )
+    delivery = build_answer_delivery(provider)
+    processor = TranslateCommandProcessor(
+        router, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("translate en Привет"),
+        "request-translate-6",
+        "en Привет",
+    )
+
+    assert chat_client.model == "GigaChat-2-Pro"
+
+
+# --- wiki ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("wiki DHCP", "DHCP"),
+        ("WIKI DHCP", "DHCP"),
+        ("  wiki   виртуальная машина  ", "виртуальная машина"),
+        ("wiki", ""),
+        ("wikipedia DHCP", None),
+        ("моя wiki страница", None),
+    ],
+)
+def test_parse_wiki_command(
+    text: str, expected: str | None
+) -> None:
+    assert parse_wiki_command(text) == expected
+
+
+@pytest.mark.asyncio
+async def test_wiki_command_processor_sends_summary() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    wikipedia = FakeWikipediaProvider(
+        summary="DHCP — протокол динамической настройки узла."
+    )
+    delivery = build_answer_delivery(provider)
+    processor = WikiCommandProcessor(
+        wikipedia, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("wiki DHCP"),
+        "request-wiki-1",
+        "DHCP",
+    )
+
+    assert wikipedia.requested_topics == ["DHCP"]
+    assert provider.sent == [
+        (
+            "71111111111",
+            "DHCP — протокол динамической настройки узла.",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wiki_command_processor_truncates_long_summary() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    long_summary = (
+        "Первое предложение с деталями. "
+        + "Слово " * 200
+        + "Последнее предложение."
+    )
+    wikipedia = FakeWikipediaProvider(
+        summary=long_summary
+    )
+    delivery = build_answer_delivery(provider)
+    processor = WikiCommandProcessor(
+        wikipedia, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("wiki тема"),
+        "request-wiki-2",
+        "тема",
+    )
+
+    assert provider.sent
+    sent_text_total = "".join(
+        text for _, text in provider.sent
+    )
+    assert len(sent_text_total) < len(long_summary)
+
+
+@pytest.mark.asyncio
+async def test_wiki_command_processor_reports_empty_topic() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    wikipedia = FakeWikipediaProvider(summary="unused")
+    delivery = build_answer_delivery(provider)
+    processor = WikiCommandProcessor(
+        wikipedia, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("wiki"), "request-wiki-3", ""
+    )
+
+    assert provider.sent == [
+        ("71111111111", WIKI_EMPTY_TOPIC_MESSAGE)
+    ]
+    assert wikipedia.requested_topics == []
+
+
+@pytest.mark.asyncio
+async def test_wiki_command_processor_reports_not_found() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    wikipedia = FakeWikipediaProvider(
+        error=WikipediaNotFoundError("missing")
+    )
+    delivery = build_answer_delivery(provider)
+    processor = WikiCommandProcessor(
+        wikipedia, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("wiki абракадабра"),
+        "request-wiki-4",
+        "абракадабра",
+    )
+
+    assert provider.sent == [
+        ("71111111111", WIKI_NOT_FOUND_MESSAGE)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wiki_command_processor_reports_unavailable_on_timeout() -> None:
+    provider = FakeSMSProvider()
+    runtime_state = RuntimeState()
+    wikipedia = FakeWikipediaProvider(
+        error=WikipediaError("timeout")
+    )
+    delivery = build_answer_delivery(provider)
+    processor = WikiCommandProcessor(
+        wikipedia, delivery, runtime_state
+    )
+
+    await processor(
+        incoming_sms("wiki DHCP"),
+        "request-wiki-5",
+        "DHCP",
+    )
+
+    assert provider.sent == [
+        ("71111111111", WIKI_UNAVAILABLE_MESSAGE)
+    ]
+
+
+# --- context exclusion for the new commands ----------------------------
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_tool_commands_and_their_replies() -> None:
+    dialog = [
+        make_message(
+            text="calc 2+2",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="4",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="translate en Привет",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="Hello",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="wiki DHCP",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 2, tzinfo=UTC),
+        ),
+        make_message(
+            text="DHCP — протокол динамической настройки узла.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 2, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="help",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 3, tzinfo=UTC),
+        ),
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 4, tzinfo=UTC),
+        ),
+        make_message(
+            text="NAT — это трансляция адресов.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 4, 5, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(
+        client, sms_provider, max_context_messages=20
+    )
+
+    await router.answer(incoming_sms(), "request-tools-1")
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    assert "calc 2+2" not in contents
+    assert "4" not in contents
+    assert "translate en Привет" not in contents
+    assert "Hello" not in contents
+    assert "wiki DHCP" not in contents
+    assert (
+        "DHCP — протокол динамической настройки узла."
+        not in contents
+    )
+    assert "help" not in contents
+    assert "Что такое NAT?" in contents
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_calc_reply_even_though_result_is_dynamic() -> None:
+    """
+    The calc reply is a computed number that cannot be
+    matched by any fixed text -- only pairing it with the
+    preceding "calc" command keeps it out of context.
+    """
+    dialog = [
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="NAT — это трансляция адресов.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 5, tzinfo=UTC),
+        ),
+        make_message(
+            text="calc 1250*1.2",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="1500",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 1, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(client, sms_provider)
+
+    await router.answer(incoming_sms(), "request-calc-context")
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    assert "calc 1250*1.2" not in contents
+    assert "1500" not in contents
+    assert "NAT — это трансляция адресов." in contents
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_translate_reply_even_though_translation_is_dynamic() -> None:
+    dialog = [
+        make_message(
+            text="translate Hello, how are you?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="Привет, как дела?",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="NAT — это трансляция адресов.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 5, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(client, sms_provider)
+
+    await router.answer(incoming_sms(), "request-translate-context")
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    assert "translate Hello, how are you?" not in contents
+    assert "Привет, как дела?" not in contents
+    assert "NAT — это трансляция адресов." in contents
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_wiki_reply_even_though_summary_is_dynamic() -> None:
+    dialog = [
+        make_message(
+            text="wiki DHCP",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="DHCP — протокол динамической настройки узла.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="NAT — это трансляция адресов.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 5, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(client, sms_provider)
+
+    await router.answer(incoming_sms(), "request-wiki-context")
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    assert "wiki DHCP" not in contents
+    assert (
+        "DHCP — протокол динамической настройки узла."
+        not in contents
+    )
+    assert "NAT — это трансляция адресов." in contents
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_multi_segment_wiki_reply() -> None:
+    """
+    translate/wiki replies can be split into several
+    outgoing SMS segments by AnswerDelivery -- every
+    segment up to the next incoming message must stay
+    hidden, not just the first one.
+    """
+    dialog = [
+        make_message(
+            text="wiki DHCP",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
+        ),
+        make_message(
+            text="[1/2] DHCP — протокол динамической настройки узла сети.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="[2/2] Использует UDP-порты 67 и 68.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 0, 2, tzinfo=UTC),
+        ),
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 1, tzinfo=UTC),
+        ),
+        make_message(
+            text="NAT — это трансляция адресов.",
+            incoming=False,
+            sent_at=datetime(2026, 8, 20, 9, 1, 5, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(client, sms_provider)
+
+    await router.answer(incoming_sms(), "request-wiki-multi-segment")
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    assert "wiki DHCP" not in contents
+    assert not any(
+        "DHCP" in content for content in contents
+    )
+    assert "NAT — это трансляция адресов." in contents
+
+
+@pytest.mark.asyncio
+async def test_context_excludes_help_reply_segments() -> None:
+    help_segments = format_sms_answer(
+        HELP_TEXT, add_warning=False
+    )
+    assert len(help_segments) > 1  # sanity: help splits
+
+    dialog = [
+        make_message(
+            text=segment,
+            incoming=False,
+            sent_at=datetime(
+                2026, 8, 20, 9, index, tzinfo=UTC
+            ),
+        )
+        for index, segment in enumerate(help_segments)
+    ] + [
+        make_message(
+            text="Что такое NAT?",
+            incoming=True,
+            sent_at=datetime(2026, 8, 20, 9, 30, tzinfo=UTC),
+        ),
+    ]
+    sms_provider = FakeSMSProvider(dialog=dialog)
+    client = FakeChatClient(result="ответ")
+    router = build_router(client, sms_provider)
+
+    await router.answer(incoming_sms(), "request-tools-2")
+
+    contents = [
+        message.content for message in client.messages
+    ]
+    for segment in help_segments:
+        assert segment not in contents

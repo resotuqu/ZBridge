@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -18,6 +19,17 @@ from app.schemas.messages import (
     ChatRole,
     IncomingSMS,
 )
+from app.services.calculator import (
+    CalculatorError,
+    DivisionByZeroCalcError,
+    EmptyExpressionError,
+)
+from app.services.calculator import (
+    evaluate as evaluate_calc_expression,
+)
+from app.services.calculator import (
+    format_result as format_calc_result,
+)
 from app.services.gigachat import (
     GigaChatError,
     GigaChatModel,
@@ -28,6 +40,11 @@ from app.services.plusofon import (
     SMSMessage,
 )
 from app.services.sms_formatter import format_sms_answer
+from app.services.wikipedia import (
+    WikipediaError,
+    WikipediaNotFoundError,
+    WikipediaProvider,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -46,6 +63,36 @@ MODELS_UNAVAILABLE_MESSAGE = "Модели сейчас недоступны :("
 MODEL_NOT_FOUND_MESSAGE = "Модель недоступна."
 LATIN_ON_MESSAGE = "Latin: ON"
 LATIN_OFF_MESSAGE = "Latin: OFF"
+
+HELP_TEXT = (
+    "Вопрос=ИИ; +=ещё; news [тема]; weather [город]; "
+    "calc; translate; wiki; currency; models; "
+    "latin on/off; stat; clear."
+)
+
+CALC_EMPTY_EXPRESSION_MESSAGE = "Пустое выражение."
+CALC_INVALID_EXPRESSION_MESSAGE = (
+    "Некорректное выражение."
+)
+CALC_DIVISION_BY_ZERO_MESSAGE = "Деление на ноль."
+
+TRANSLATE_EMPTY_TEXT_MESSAGE = (
+    "Укажите текст: translate [ru/en] <текст>."
+)
+TRANSLATE_SYSTEM_PROMPT = (
+    "Ты профессиональный переводчик для SMS-сервиса.\n"
+    "Переведи текст пользователя на язык с кодом "
+    "{target_lang}.\n"
+    "Ответь только переводом, без пояснений, кавычек "
+    "и Markdown."
+)
+
+WIKI_EMPTY_TOPIC_MESSAGE = "Укажите тему: wiki <тема>."
+WIKI_NOT_FOUND_MESSAGE = "Статья не найдена."
+WIKI_UNAVAILABLE_MESSAGE = (
+    "Википедия сейчас недоступна :("
+)
+_WIKI_SUMMARY_LIMIT = 400
 
 SMS_SYSTEM_PROMPT = """Ты отвечаешь пользователю через обычные SMS.
 
@@ -69,12 +116,14 @@ _STAT_KEYWORDS = {"stat", "stats", "стат"}
 _CLEAR_KEYWORDS = {"clear", "сброс"}
 _CONTINUE_KEYWORDS = {"+"}
 _MODELS_KEYWORDS = {"models"}
+_HELP_KEYWORDS = {"help", "помощь"}
 
 _SERVICE_COMMAND_KEYWORDS = (
     _STAT_KEYWORDS
     | _CLEAR_KEYWORDS
     | _CONTINUE_KEYWORDS
     | _MODELS_KEYWORDS
+    | _HELP_KEYWORDS
 )
 
 _SERVICE_NOTIFICATION_PREFIXES = (
@@ -83,6 +132,24 @@ _SERVICE_NOTIFICATION_PREFIXES = (
 )
 
 _MODELS_LIST_MARKER = "Текущая: "
+
+_CALC_RE = re.compile(
+    r"^\s*calc(?:\s+(.*))?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_TRANSLATE_RE = re.compile(
+    r"^\s*translate(?:\s+(.*))?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_WIKI_RE = re.compile(
+    r"^\s*wiki(?:\s+(.*))?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_TRANSLATE_LANG_RE = re.compile(
+    r"^([a-zA-Z]{2})\s+(.+)$",
+    re.DOTALL,
+)
+_CYRILLIC_RE = re.compile(r"[а-яё]", re.IGNORECASE)
 
 
 def is_stat_command(text: str) -> bool:
@@ -101,6 +168,10 @@ def is_models_command(text: str) -> bool:
     return text.strip().lower() in _MODELS_KEYWORDS
 
 
+def is_help_command(text: str) -> bool:
+    return text.strip().lower() in _HELP_KEYWORDS
+
+
 def parse_latin_command(text: str) -> bool | None:
     normalized = text.strip().lower()
 
@@ -111,6 +182,72 @@ def parse_latin_command(text: str) -> bool | None:
         return False
 
     return None
+
+
+def parse_calc_command(text: str) -> str | None:
+    match = _CALC_RE.match(text)
+
+    if match is None:
+        return None
+
+    return (match.group(1) or "").strip()
+
+
+def parse_translate_command(text: str) -> str | None:
+    match = _TRANSLATE_RE.match(text)
+
+    if match is None:
+        return None
+
+    return (match.group(1) or "").strip()
+
+
+def parse_wiki_command(text: str) -> str | None:
+    match = _WIKI_RE.match(text)
+
+    if match is None:
+        return None
+
+    return (match.group(1) or "").strip()
+
+
+def _split_translate_target(
+    argument: str,
+) -> tuple[str | None, str]:
+    match = _TRANSLATE_LANG_RE.match(argument)
+
+    if match is not None:
+        return (
+            match.group(1).lower(),
+            match.group(2).strip(),
+        )
+
+    return None, argument.strip()
+
+
+def _looks_russian(text: str) -> bool:
+    return bool(_CYRILLIC_RE.search(text))
+
+
+def _truncate_summary(
+    text: str,
+    limit: int = _WIKI_SUMMARY_LIMIT,
+) -> str:
+    stripped = text.strip()
+
+    if len(stripped) <= limit:
+        return stripped
+
+    truncated = stripped[:limit]
+    boundary = max(
+        truncated.rfind(". "),
+        truncated.rfind(".\n"),
+    )
+
+    if boundary > limit // 2:
+        return truncated[: boundary + 1].strip()
+
+    return truncated.rstrip() + "…"
 
 
 def _generation_model_ids(
@@ -148,7 +285,23 @@ def _service_notification_texts() -> set[str]:
         MODEL_NOT_FOUND_MESSAGE,
         LATIN_ON_MESSAGE,
         LATIN_OFF_MESSAGE,
+        CALC_EMPTY_EXPRESSION_MESSAGE,
+        CALC_INVALID_EXPRESSION_MESSAGE,
+        CALC_DIVISION_BY_ZERO_MESSAGE,
+        TRANSLATE_EMPTY_TEXT_MESSAGE,
+        WIKI_EMPTY_TOPIC_MESSAGE,
+        WIKI_NOT_FOUND_MESSAGE,
+        WIKI_UNAVAILABLE_MESSAGE,
     }
+
+
+def _help_reply_segments() -> frozenset[str]:
+    return frozenset(
+        format_sms_answer(HELP_TEXT, add_warning=False)
+    )
+
+
+_HELP_REPLY_SEGMENTS = _help_reply_segments()
 
 
 def _is_service_message(text: str) -> bool:
@@ -158,6 +311,9 @@ def _is_service_message(text: str) -> bool:
         return True
 
     if normalized in _service_notification_texts():
+        return True
+
+    if normalized in _HELP_REPLY_SEGMENTS:
         return True
 
     if normalized.startswith(
@@ -175,6 +331,39 @@ def _is_service_message(text: str) -> bool:
         return True
 
     if parse_latin_command(normalized) is not None:
+        return True
+
+    if parse_calc_command(normalized) is not None:
+        return True
+
+    if parse_translate_command(normalized) is not None:
+        return True
+
+    if parse_wiki_command(normalized) is not None:
+        return True
+
+    return False
+
+
+def _is_hidden_exchange_command(text: str) -> bool:
+    """
+    Commands whose outgoing reply is dynamic (calc result,
+    translation, wiki summary) and therefore cannot be
+    recognized by matching fixed reply text. The whole
+    exchange -- the command and every outgoing SMS up to
+    the next incoming message -- must be hidden from the
+    GigaChat context regardless of what that reply says.
+    """
+    if is_help_command(text):
+        return True
+
+    if parse_calc_command(text) is not None:
+        return True
+
+    if parse_translate_command(text) is not None:
+        return True
+
+    if parse_wiki_command(text) is not None:
         return True
 
     return False
@@ -347,6 +536,23 @@ class MessageRouter:
             phone,
         )
 
+    async def translate_answer(
+        self,
+        phone: str,
+        request_id: str,
+        messages: list[ChatMessage],
+        *,
+        model: str | None = None,
+    ) -> str:
+        effective_model = model or self._model
+
+        return await self._call_chat(
+            messages,
+            effective_model,
+            request_id,
+            phone,
+        )
+
     def _build_system_prompt(self, phone: str) -> str:
         latin_enabled = (
             self._runtime_state.get_latin_mode(
@@ -447,20 +653,42 @@ class MessageRouter:
             )
         )
 
-        filtered = [
-            entry
-            for entry in dialog
-            if entry.text.strip()
-            and (
-                boundary is None
-                or entry.created_at > boundary
-            )
-            and not _is_service_message(
-                entry.text.strip()
-            )
-        ]
+        ordered = sorted(
+            dialog, key=lambda entry: entry.sent_at
+        )
 
-        filtered.sort(key=lambda entry: entry.sent_at)
+        filtered: list[SMSMessage] = []
+        hide_reply = False
+
+        for entry in ordered:
+            text = entry.text.strip()
+
+            if not text:
+                continue
+
+            if (
+                boundary is not None
+                and entry.created_at <= boundary
+            ):
+                continue
+
+            if entry.incoming:
+                if _is_hidden_exchange_command(text):
+                    hide_reply = True
+                    continue
+
+                hide_reply = False
+
+                if _is_service_message(text):
+                    continue
+            else:
+                if hide_reply:
+                    continue
+
+                if _is_service_message(text):
+                    continue
+
+            filtered.append(entry)
 
         if (
             exclude_text is not None
@@ -847,6 +1075,267 @@ class LatinCommandProcessor:
                     "error_type": type(exc).__name__,
                 },
             )
+
+
+class HelpCommandProcessor:
+    def __init__(
+        self,
+        sms_provider: SMSProvider,
+        runtime_state: RuntimeState,
+    ) -> None:
+        self._sms_provider = sms_provider
+        self._runtime_state = runtime_state
+
+    async def __call__(
+        self,
+        message: IncomingSMS,
+        request_id: str,
+    ) -> None:
+        phone_lock = self._runtime_state.get_phone_lock(
+            message.sender
+        )
+
+        async with phone_lock:
+            segments = format_sms_answer(
+                HELP_TEXT, add_warning=False
+            )
+
+            try:
+                await _send_segments(
+                    self._sms_provider,
+                    message.sender,
+                    segments,
+                )
+            except PlusofonError as exc:
+                logger.error(
+                    "Help confirmation SMS failed",
+                    extra={
+                        "event": "plusofon_error",
+                        "request_id": request_id,
+                        "phone": message.sender,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+
+class CalcCommandProcessor:
+    def __init__(
+        self,
+        sms_provider: SMSProvider,
+        runtime_state: RuntimeState,
+    ) -> None:
+        self._sms_provider = sms_provider
+        self._runtime_state = runtime_state
+
+    async def __call__(
+        self,
+        message: IncomingSMS,
+        request_id: str,
+        expression: str,
+    ) -> None:
+        phone_lock = self._runtime_state.get_phone_lock(
+            message.sender
+        )
+
+        async with phone_lock:
+            text = self._build_reply(expression)
+
+            try:
+                await self._sms_provider.send(
+                    message.sender, text
+                )
+            except PlusofonError as exc:
+                logger.error(
+                    "Calc confirmation SMS failed",
+                    extra={
+                        "event": "plusofon_error",
+                        "request_id": request_id,
+                        "phone": message.sender,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+    @staticmethod
+    def _build_reply(expression: str) -> str:
+        try:
+            result = evaluate_calc_expression(
+                expression
+            )
+        except EmptyExpressionError:
+            return CALC_EMPTY_EXPRESSION_MESSAGE
+        except DivisionByZeroCalcError:
+            return CALC_DIVISION_BY_ZERO_MESSAGE
+        except CalculatorError:
+            return CALC_INVALID_EXPRESSION_MESSAGE
+
+        return format_calc_result(result)
+
+
+class TranslateCommandProcessor:
+    def __init__(
+        self,
+        message_router: MessageRouter,
+        answer_delivery: AnswerDelivery,
+        runtime_state: RuntimeState,
+    ) -> None:
+        self._message_router = message_router
+        self._answer_delivery = answer_delivery
+        self._runtime_state = runtime_state
+
+    async def __call__(
+        self,
+        message: IncomingSMS,
+        request_id: str,
+        argument: str,
+    ) -> None:
+        phone_lock = self._runtime_state.get_phone_lock(
+            message.sender
+        )
+
+        async with phone_lock:
+            text = await self._translate(
+                message, request_id, argument
+            )
+
+            try:
+                await self._answer_delivery.send_answer(
+                    message.sender, text
+                )
+            except PlusofonError as exc:
+                logger.error(
+                    "Outgoing SMS failed",
+                    extra={
+                        "event": "plusofon_error",
+                        "request_id": request_id,
+                        "phone": message.sender,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+    async def _translate(
+        self,
+        message: IncomingSMS,
+        request_id: str,
+        argument: str,
+    ) -> str:
+        target_lang, source_text = (
+            _split_translate_target(argument)
+        )
+
+        if not source_text:
+            return TRANSLATE_EMPTY_TEXT_MESSAGE
+
+        if target_lang is None:
+            target_lang = (
+                "en"
+                if _looks_russian(source_text)
+                else "ru"
+            )
+
+        effective_model = (
+            self._runtime_state.get_selected_model(
+                message.sender
+            )
+        )
+
+        chat_messages = [
+            ChatMessage(
+                role=ChatRole.SYSTEM,
+                content=(
+                    TRANSLATE_SYSTEM_PROMPT.format(
+                        target_lang=target_lang
+                    )
+                ),
+            ),
+            ChatMessage(
+                role=ChatRole.USER,
+                content=source_text,
+            ),
+        ]
+
+        return (
+            await self
+            ._message_router
+            .translate_answer(
+                message.sender,
+                request_id,
+                chat_messages,
+                model=effective_model,
+            )
+        )
+
+
+class WikiCommandProcessor:
+    def __init__(
+        self,
+        wikipedia_provider: WikipediaProvider,
+        answer_delivery: AnswerDelivery,
+        runtime_state: RuntimeState,
+    ) -> None:
+        self._wikipedia_provider = wikipedia_provider
+        self._answer_delivery = answer_delivery
+        self._runtime_state = runtime_state
+
+    async def __call__(
+        self,
+        message: IncomingSMS,
+        request_id: str,
+        topic: str,
+    ) -> None:
+        phone_lock = self._runtime_state.get_phone_lock(
+            message.sender
+        )
+
+        async with phone_lock:
+            text = await self._build_reply(
+                request_id, message.sender, topic
+            )
+
+            try:
+                await self._answer_delivery.send_answer(
+                    message.sender, text
+                )
+            except PlusofonError as exc:
+                logger.error(
+                    "Outgoing SMS failed",
+                    extra={
+                        "event": "plusofon_error",
+                        "request_id": request_id,
+                        "phone": message.sender,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+    async def _build_reply(
+        self,
+        request_id: str,
+        phone: str,
+        topic: str,
+    ) -> str:
+        if not topic.strip():
+            return WIKI_EMPTY_TOPIC_MESSAGE
+
+        try:
+            summary = (
+                await self
+                ._wikipedia_provider
+                .get_summary(topic)
+            )
+        except WikipediaNotFoundError:
+            return WIKI_NOT_FOUND_MESSAGE
+        except WikipediaError as exc:
+            logger.error(
+                "Wikipedia lookup failed",
+                extra={
+                    "event": "wikipedia_error",
+                    "request_id": request_id,
+                    "phone": phone,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return WIKI_UNAVAILABLE_MESSAGE
+
+        return _truncate_summary(summary)
 
 
 class ClearCommandProcessor:
