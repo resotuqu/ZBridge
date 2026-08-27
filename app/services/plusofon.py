@@ -240,7 +240,7 @@ class PlusofonClient:
                 "text": text,
                 "number_id": self._number_id,
                 "to": int(recipient),
-                "reject_long": True,
+                "reject_long": False,
                 "count_pdu": True,
             },
         )

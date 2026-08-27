@@ -33,24 +33,18 @@ def test_segment_length_ucs2_counts_utf16_units() -> None:
     assert segment_length("🙂", "ucs2") == 2
 
 
-def test_format_short_answer_is_single_segment_without_prefix() -> None:
-    segments = format_sms_answer(
+def test_format_short_answer_without_prefix() -> None:
+    assert format_sms_answer(
         "Виртуальная локальная сеть.",
         add_warning=False,
-    )
-
-    assert segments == ["Виртуальная локальная сеть."]
+    ) == "Виртуальная локальная сеть."
 
 
-def test_format_short_answer_with_warning_gets_prefix() -> None:
-    segments = format_sms_answer(
+def test_format_short_answer_with_warning_prefix() -> None:
+    assert format_sms_answer(
         "Виртуальная локальная сеть.",
         add_warning=True,
-    )
-
-    assert segments == [
-        "[!] Виртуальная локальная сеть."
-    ]
+    ) == "[!] Виртуальная локальная сеть."
 
 
 def test_format_strips_markdown_and_normalizes_whitespace() -> None:
@@ -62,14 +56,8 @@ def test_format_strips_markdown_and_normalizes_whitespace() -> None:
         "[ссылка](https://example.test)"
     )
 
-    segments = format_sms_answer(raw, add_warning=False)
+    text = format_sms_answer(raw, add_warning=False)
 
-    text = " ".join(
-        segment.split(" ", 1)[-1]
-        if segment.startswith("[")
-        else segment
-        for segment in segments
-    )
     assert "#" not in text
     assert "**" not in text
     assert "*" not in text
@@ -83,66 +71,34 @@ def test_format_strips_markdown_and_normalizes_whitespace() -> None:
     assert "  " not in text
 
 
-def test_format_splits_long_gsm7_answer_with_part_prefixes() -> None:
-    word = "word"
-    raw = " ".join([word] * 60)
-
-    segments = format_sms_answer(raw, add_warning=False)
-
-    assert len(segments) > 1
-
-    total = len(segments)
-    for index, segment in enumerate(segments, start=1):
-        assert segment.startswith(f"[{index}/{total}] ")
-        assert len(segment) <= 153
-
-    reconstructed = " ".join(
-        segment.split(" ", 1)[1] for segment in segments
-    )
-    assert reconstructed == raw
-
-
-def test_format_splits_long_gsm7_answer_with_warning_prefix_on_first_only() -> None:
+def test_format_keeps_long_gsm7_answer_as_one_logical_message() -> None:
     raw = " ".join(["word"] * 60)
 
-    segments = format_sms_answer(raw, add_warning=True)
+    formatted = format_sms_answer(raw, add_warning=False)
 
-    assert segments[0].startswith("[!] [1/")
-    for segment in segments[1:]:
-        assert not segment.startswith("[!]")
+    assert segment_length(formatted, "gsm7") > 160
+    assert formatted == raw
+    assert "[1/" not in formatted
 
 
-def test_format_splits_long_ucs2_answer_respecting_budget() -> None:
+def test_format_keeps_long_ucs2_answer_as_one_logical_message() -> None:
     raw = " ".join(["слово"] * 30)
 
-    segments = format_sms_answer(raw, add_warning=False)
+    formatted = format_sms_answer(raw, add_warning=False)
 
-    assert len(segments) > 1
-
-    total = len(segments)
-    for index, segment in enumerate(segments, start=1):
-        assert segment.startswith(f"[{index}/{total}] ")
-        assert segment_length(segment, "ucs2") <= 67
-
-    reconstructed = " ".join(
-        segment.split(" ", 1)[1] for segment in segments
-    )
-    assert reconstructed == raw
+    assert segment_length(formatted, "ucs2") > 70
+    assert formatted == raw
+    assert "[1/" not in formatted
 
 
-def test_format_hard_splits_a_single_overlong_word() -> None:
-    raw = "a" * 400
+def test_format_adds_one_warning_prefix_to_a_long_message() -> None:
+    raw = " ".join(["слово"] * 30)
 
-    segments = format_sms_answer(raw, add_warning=False)
+    formatted = format_sms_answer(raw, add_warning=True)
 
-    assert len(segments) > 1
-    assert "".join(
-        segment.split(" ", 1)[1] for segment in segments
-    ) == raw
+    assert formatted == f"[!] {raw}"
+    assert "[1/" not in formatted
 
 
-def test_format_never_produces_empty_segments() -> None:
-    segments = format_sms_answer("", add_warning=False)
-
-    assert all(segment.strip() for segment in segments)
-    assert len(segments) >= 1
+def test_format_never_returns_blank_text() -> None:
+    assert format_sms_answer("", add_warning=False) == "..."

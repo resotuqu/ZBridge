@@ -1115,7 +1115,7 @@ async def test_answer_delivery_fails_open_when_history_unavailable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_answer_delivery_sends_multiple_segments_and_sums_pdu() -> None:
+async def test_answer_delivery_sends_one_long_logical_sms() -> None:
     provider = FakeSMSProvider()
     delivery = AnswerDelivery(
         provider,
@@ -1133,11 +1133,10 @@ async def test_answer_delivery_sends_multiple_segments_and_sums_pdu() -> None:
         "71111111111", long_text
     )
 
-    assert len(provider.sent) > 1
-    assert result.pdu_count == len(provider.sent)
-    for to, text in provider.sent:
-        assert to == "71111111111"
-        assert text.startswith("[")
+    assert provider.sent == [
+        ("71111111111", long_text)
+    ]
+    assert result.pdu_count == 1
 
 
 @pytest.mark.asyncio
@@ -1592,12 +1591,11 @@ async def test_help_command_processor_sends_full_text() -> None:
 
     await processor(incoming_sms("help"), "request-help-1")
 
-    expected_segments = format_sms_answer(
+    expected_text = format_sms_answer(
         HELP_TEXT, add_warning=False
     )
     assert provider.sent == [
-        ("71111111111", segment)
-        for segment in expected_segments
+        ("71111111111", expected_text)
     ]
 
 
@@ -2842,12 +2840,11 @@ async def test_context_excludes_wiki_reply_even_though_summary_is_dynamic() -> N
 
 
 @pytest.mark.asyncio
-async def test_context_excludes_multi_segment_wiki_reply() -> None:
+async def test_context_excludes_long_concatenated_wiki_reply() -> None:
     """
-    translate/wiki replies can be split into several
-    outgoing SMS segments by AnswerDelivery -- every
-    segment up to the next incoming message must stay
-    hidden, not just the first one.
+    A long translate/wiki reply is sent as one logical
+    concatenated SMS. The command exchange must remain
+    hidden from the next normal AI prompt.
     """
     dialog = [
         make_message(
@@ -2856,14 +2853,12 @@ async def test_context_excludes_multi_segment_wiki_reply() -> None:
             sent_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
         ),
         make_message(
-            text="[1/2] DHCP — протокол динамической настройки узла сети.",
+            text=(
+                "DHCP — протокол динамической настройки "
+                "узла сети. Использует UDP-порты 67 и 68."
+            ),
             incoming=False,
             sent_at=datetime(2026, 8, 20, 9, 0, 1, tzinfo=UTC),
-        ),
-        make_message(
-            text="[2/2] Использует UDP-порты 67 и 68.",
-            incoming=False,
-            sent_at=datetime(2026, 8, 20, 9, 0, 2, tzinfo=UTC),
         ),
         make_message(
             text="Что такое NAT?",
@@ -3103,21 +3098,19 @@ async def test_context_excludes_bare_news_command_and_error_reply() -> None:
 
 
 @pytest.mark.asyncio
-async def test_context_excludes_help_reply_segments() -> None:
-    help_segments = format_sms_answer(
+async def test_context_excludes_long_help_reply() -> None:
+    help_text = format_sms_answer(
         HELP_TEXT, add_warning=False
     )
-    assert len(help_segments) > 1  # sanity: help splits
 
     dialog = [
         make_message(
-            text=segment,
+            text=help_text,
             incoming=False,
             sent_at=datetime(
-                2026, 8, 20, 9, index, tzinfo=UTC
+                2026, 8, 20, 9, 0, tzinfo=UTC
             ),
         )
-        for index, segment in enumerate(help_segments)
     ] + [
         make_message(
             text="Что такое NAT?",
@@ -3134,5 +3127,4 @@ async def test_context_excludes_help_reply_segments() -> None:
     contents = [
         message.content for message in client.messages
     ]
-    for segment in help_segments:
-        assert segment not in contents
+    assert help_text not in contents

@@ -93,12 +93,33 @@ async def test_send_sms_uses_expected_request() -> None:
         "text": "Короткий ответ.",
         "number_id": 123,
         "to": 79991234567,
-        "reject_long": True,
+        "reject_long": False,
         "count_pdu": True,
     }
 
     assert result.message_id == "sms-123"
     assert result.pdu_count == 2
+
+
+@pytest.mark.asyncio
+async def test_send_long_sms_as_one_concatenated_submission() -> None:
+    long_text = " ".join(["длинный ответ"] * 20)
+
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.post(SEND_URL).mock(
+            return_value=success_response()
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            client = build_client(http_client)
+
+            await client.send("79991234567", long_text)
+
+    assert route.call_count == 1
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["text"] == long_text
+    assert payload["reject_long"] is False
+    assert payload["count_pdu"] is True
 
 
 @pytest.mark.asyncio
